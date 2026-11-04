@@ -7,6 +7,8 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   AppPageRoute,
   BookItem,
+  BookReadingProgress,
+  ChapterSummaryMetadata,
   ClubSettings,
   ExternalCatalogBook,
   PresetPersonalityId,
@@ -22,9 +24,21 @@ import {
   PERSONALITY_PROFILES,
   buildBookFromExternalCatalogItem,
   buildBookFromExtractedText,
+  buildSummaryCacheKey,
+  computeContentHash,
   computeMlRecommendations,
+  hydrateBookWithGutenbergChapters,
 } from './utils/bookLogic';
-import { extractTextFromUploadedFile } from './utils/fileExtractor';
+import {
+  FileExtractionResult,
+  extractTextFromUploadedFile,
+} from './utils/fileExtractor';
+import {
+  CachedSummaryEntry,
+  loadBooksFromIndexedDb,
+  loadPersistedAppState,
+  savePersistedAppState,
+} from './utils/storage';
 import {
   BookPosterCover,
   CircularClubBadge,
@@ -33,6 +47,7 @@ import {
   ReadersClubLogo,
 } from './components/TactileArt';
 import { ReaderWorkspace } from './components/ReaderModal';
+import { MascotChatWidget } from './components/MascotChatWidget';
 import { DotFooter } from './components/DotFooter';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
 import {
@@ -46,6 +61,8 @@ import {
   Flame,
   Play,
   BookOpen,
+  ThumbsUp,
+  ThumbsDown,
 } from 'lucide-react';
 
 function getInitialRouteFromPath(): AppPageRoute {
@@ -59,13 +76,38 @@ function getInitialRouteFromPath(): AppPageRoute {
 }
 
 export default function App() {
-  const [activePage, setActivePage] = useState<AppPageRoute>(getInitialRouteFromPath);
+  const initialPersisted = useMemo(() => loadPersistedAppState(), []);
 
-  const [books, setBooks] = useState<BookItem[]>(OPEN_SOURCE_BOOKS);
-  const [selectedBookId, setSelectedBookId] = useState<string>(
-    OPEN_SOURCE_BOOKS[0].id
+  const [activePage, setActivePage] = useState<AppPageRoute>(
+    getInitialRouteFromPath
   );
-  const [activeMode, setActiveMode] = useState<SummaryMode>('compact');
+
+  const [books, setBooks] = useState<BookItem[]>(() => {
+    const customIds = new Set(initialPersisted.customBooks.map((b) => b.id));
+    const seedBooks = OPEN_SOURCE_BOOKS.filter((b) => !customIds.has(b.id));
+    return [...initialPersisted.customBooks, ...seedBooks];
+  });
+
+  const [selectedBookId, setSelectedBookId] = useState<string>(
+    initialPersisted.lastActiveBookId || OPEN_SOURCE_BOOKS[0].id
+  );
+
+  const [readingProgressByBookId, setReadingProgressByBookId] = useState<
+    Record<string, BookReadingProgress>
+  >(initialPersisted.readingProgressByBookId || {});
+
+  const [summaryCache, setSummaryCache] = useState<
+    Record<string, CachedSummaryEntry>
+  >(initialPersisted.summaryCache || {});
+
+  const [activeMode, setActiveMode] = useState<SummaryMode>(() => {
+    const lastId = initialPersisted.lastActiveBookId || OPEN_SOURCE_BOOKS[0].id;
+    return (
+      initialPersisted.readingProgressByBookId?.[lastId]?.lastSummaryMode ||
+      initialPersisted.settings.defaultSummaryMode ||
+      'compact'
+    );
+  });
 
   const [selectedGenre, setSelectedGenre] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -74,39 +116,80 @@ export default function App() {
   const [isSearchingApi, setIsSearchingApi] = useState<boolean>(false);
   const [featuredIndex, setFeaturedIndex] = useState<number>(0);
 
-  const [settings, setSettings] = useState<ClubSettings>({
-    authorPersonality: 'taylor_swift',
-    narratorPersonality: 'gandalf',
-    customAuthorTrait: '',
-    customNarratorTrait: '',
-    useCustomAuthor: false,
-    useCustomNarrator: false,
-    targetCompactRatio: 0.175,
-  });
+  const [settings, setSettings] = useState<ClubSettings>(
+    initialPersisted.settings
+  );
 
-  const [tasteProfile, setTasteProfile] = useState<UserTasteProfile>({
-    viewedBookIds: ['art-of-war', 'cat-pg-1184'],
-    compressedBookIds: [],
-    favoriteGenres: {
-      'Philosophy & Strategy': 3,
-      'Sci-Fi & Dystopia': 2,
-      'Epic & Adventure': 2,
-    },
-    activePersona: 'taylor_swift',
-    searchHistory: [],
-  });
+  const [tasteProfile, setTasteProfile] = useState<UserTasteProfile>(
+    initialPersisted.tasteProfile
+  );
 
   // Upload state
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadAuthor, setUploadAuthor] = useState('');
   const [uploadRawText, setUploadRawText] = useState('');
-  const [uploadFormat, setUploadFormat] = useState<'EPUB' | 'PDF' | 'TXT'>('EPUB');
+  const [uploadFormat, setUploadFormat] = useState<'EPUB' | 'PDF' | 'TXT'>(
+    'EPUB'
+  );
+  const [uploadStructuredChapters, setUploadStructuredChapters] = useState<
+    FileExtractionResult['chapters'] | undefined
+  >(undefined);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isProcessingUpload, setIsProcessingUpload] = useState(false);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const discoveryDeckRef = useRef<HTMLDivElement | null>(null);
+
+  // Hydrate full custom books from IndexedDB on mount
+  useEffect(() => {
+    let mounted = true;
+    loadBooksFromIndexedDb().then((idbBooks) => {
+      if (!mounted || idbBooks.length === 0) return;
+      setBooks((prev) => {
+        const idbMap = new Map(idbBooks.map((b) => [b.id, b]));
+        const merged = prev.map((b) => idbMap.get(b.id) || b);
+        const existingIds = new Set(merged.map((b) => b.id));
+        for (const ib of idbBooks) {
+          if (!existingIds.has(ib.id)) {
+            merged.unshift(ib);
+          }
+        }
+        return merged;
+      });
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Automatically persist state whenever library, progress, settings, tasteProfile, or summaryCache changes
+  useEffect(() => {
+    const seedIds = new Set(OPEN_SOURCE_BOOKS.map((b) => b.id));
+    const customBooks = books.filter(
+      (b) =>
+        !seedIds.has(b.id) ||
+        b.chapters.some(
+          (c) =>
+            c.summaryStatus === 'ai_generated' || c.summaryStatus === 'cached'
+        )
+    );
+    savePersistedAppState({
+      settings,
+      tasteProfile,
+      readingProgressByBookId,
+      customBooks,
+      summaryCache,
+      lastActiveBookId: selectedBookId,
+    });
+  }, [
+    books,
+    settings,
+    tasteProfile,
+    readingProgressByBookId,
+    summaryCache,
+    selectedBookId,
+  ]);
 
   function navigateToPage(page: AppPageRoute) {
     setActivePage(page);
@@ -134,8 +217,7 @@ export default function App() {
     }));
   }, [settings.authorPersonality]);
 
-  const activeBook =
-    books.find((b) => b.id === selectedBookId) || books[0];
+  const activeBook = books.find((b) => b.id === selectedBookId) || books[0];
 
   const activeAuthorProfile = PERSONALITY_PROFILES[settings.authorPersonality];
   const activeNarratorProfile =
@@ -146,8 +228,9 @@ export default function App() {
     []
   );
   const currentFeaturedBook =
-    featuredCatalogBooks[featuredIndex % Math.max(1, featuredCatalogBooks.length)] ||
-    GLOBAL_CATALOG_BOOKS[0];
+    featuredCatalogBooks[
+      featuredIndex % Math.max(1, featuredCatalogBooks.length)
+    ] || GLOBAL_CATALOG_BOOKS[0];
 
   const combinedArchivePool = useMemo(() => {
     const seen = new Set<string>();
@@ -156,7 +239,17 @@ export default function App() {
       const key = `${item.title.toLowerCase()}::${item.author.toLowerCase()}`;
       if (!seen.has(key)) {
         seen.add(key);
-        merged.push(item);
+        merged.push({
+          ...item,
+          availabilityStatus:
+            item.availabilityStatus ||
+            (item.gutenbergId ? 'full_text' : 'metadata_only'),
+          sourceAttribution:
+            item.sourceAttribution ||
+            (item.gutenbergId
+              ? `Project Gutenberg Public Domain Archive (#${item.gutenbergId})`
+              : 'Google Books Discovery Catalog (Metadata Only)'),
+        });
       }
     }
     return merged;
@@ -166,9 +259,13 @@ export default function App() {
     return combinedArchivePool.filter((b) => {
       const matchesGenre =
         selectedGenre === 'all' ||
-        b.genre.toLowerCase().includes(selectedGenre.split('&')[0].trim().toLowerCase()) ||
+        b.genre
+          .toLowerCase()
+          .includes(selectedGenre.split('&')[0].trim().toLowerCase()) ||
         (b.subgenres || []).some((s) =>
-          s.toLowerCase().includes(selectedGenre.split('&')[0].trim().toLowerCase())
+          s
+            .toLowerCase()
+            .includes(selectedGenre.split('&')[0].trim().toLowerCase())
         );
 
       if (!searchQuery.trim()) return matchesGenre;
@@ -195,11 +292,17 @@ export default function App() {
 
   const worldClassicsShelf = useMemo(() => {
     return combinedArchivePool
-      .filter((b) => (b.chapterCount || 18) >= 18)
+      .filter(
+        (b) => b.availabilityStatus === 'full_text' || Boolean(b.gutenbergId)
+      )
       .slice(0, 12);
   }, [combinedArchivePool]);
 
-  async function fetchLiveArchivePage(queryText: string, genreId: string, pageNum: number) {
+  async function fetchLiveArchivePage(
+    queryText: string,
+    genreId: string,
+    pageNum: number
+  ) {
     setIsSearchingApi(true);
     const catObj = GENRE_CATEGORIES.find((g) => g.id === genreId);
     const topicParam = catObj?.apiTopic || '';
@@ -227,7 +330,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    fetchLiveArchivePage(searchQuery, selectedGenre, catalogPage);
+    void fetchLiveArchivePage(searchQuery, selectedGenre, catalogPage);
   }, [selectedGenre, catalogPage]);
 
   function handleDynamicSearchSubmit(e: React.FormEvent) {
@@ -235,11 +338,49 @@ export default function App() {
     if (searchQuery.trim()) {
       setTasteProfile((prev) => ({
         ...prev,
-        searchHistory: [...prev.searchHistory.slice(-8), searchQuery.trim()],
+        searchHistory: [...prev.searchHistory.slice(-15), searchQuery.trim()],
       }));
     }
     setCatalogPage(1);
-    fetchLiveArchivePage(searchQuery, selectedGenre, 1);
+    void fetchLiveArchivePage(searchQuery, selectedGenre, 1);
+  }
+
+  function handleToggleLikeBook(bookId: string, e?: React.MouseEvent) {
+    e?.stopPropagation();
+    setTasteProfile((prev) => {
+      const liked = new Set(prev.likedBookIds || []);
+      const disliked = new Set(prev.dislikedBookIds || []);
+      if (liked.has(bookId)) {
+        liked.delete(bookId);
+      } else {
+        liked.add(bookId);
+        disliked.delete(bookId);
+      }
+      return {
+        ...prev,
+        likedBookIds: Array.from(liked),
+        dislikedBookIds: Array.from(disliked),
+      };
+    });
+  }
+
+  function handleToggleDislikeBook(bookId: string, e?: React.MouseEvent) {
+    e?.stopPropagation();
+    setTasteProfile((prev) => {
+      const liked = new Set(prev.likedBookIds || []);
+      const disliked = new Set(prev.dislikedBookIds || []);
+      if (disliked.has(bookId)) {
+        disliked.delete(bookId);
+      } else {
+        disliked.add(bookId);
+        liked.delete(bookId);
+      }
+      return {
+        ...prev,
+        likedBookIds: Array.from(liked),
+        dislikedBookIds: Array.from(disliked),
+      };
+    });
   }
 
   function handleOpenCatalogVolume(
@@ -248,7 +389,10 @@ export default function App() {
   ) {
     setTasteProfile((prev) => ({
       ...prev,
-      viewedBookIds: [...new Set([extBook.id, ...prev.viewedBookIds])].slice(0, 25),
+      viewedBookIds: [...new Set([extBook.id, ...prev.viewedBookIds])].slice(
+        0,
+        35
+      ),
       favoriteGenres: {
         ...prev.favoriteGenres,
         [extBook.genre]: (prev.favoriteGenres[extBook.genre] || 0) + 1,
@@ -280,7 +424,10 @@ export default function App() {
   ) {
     setTasteProfile((prev) => ({
       ...prev,
-      viewedBookIds: [...new Set([bookItem.id, ...prev.viewedBookIds])].slice(0, 25),
+      viewedBookIds: [...new Set([bookItem.id, ...prev.viewedBookIds])].slice(
+        0,
+        35
+      ),
       favoriteGenres: {
         ...prev.favoriteGenres,
         [bookItem.genre]: (prev.favoriteGenres[bookItem.genre] || 0) + 1,
@@ -295,16 +442,42 @@ export default function App() {
     setSettings((prev) => ({ ...prev, ...partial }));
   }
 
+  function handleUpdateReadingProgress(
+    bookId: string,
+    update: Partial<BookReadingProgress>
+  ) {
+    setReadingProgressByBookId((prev) => {
+      const current = prev[bookId] || {
+        bookId,
+        lastChapterIndex: 0,
+        lastSummaryMode: activeMode,
+        completedChapterIds: [],
+        updatedAt: new Date().toISOString(),
+      };
+      return {
+        ...prev,
+        [bookId]: {
+          ...current,
+          ...update,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    });
+  }
+
   function handleUpdateBookChapter(
     bookId: string,
     chapterId: string,
     personaKey: string,
     compactText: string[],
-    bulletPoints: string[]
+    bulletPoints: string[],
+    metadata?: ChapterSummaryMetadata
   ) {
     setTasteProfile((prev) => ({
       ...prev,
-      compressedBookIds: [...new Set([bookId, ...prev.compressedBookIds])],
+      compressedBookIds: [
+        ...new Set([bookId, ...(prev.compressedBookIds || [])]),
+      ],
     }));
 
     setBooks((prevBooks) =>
@@ -312,11 +485,53 @@ export default function App() {
         if (b.id !== bookId) return b;
         const updatedChapters = b.chapters.map((ch) => {
           if (ch.id !== chapterId) return ch;
+
+          // Persist to client-side summaryCache
+          const chHash =
+            metadata?.contentHash ||
+            computeContentHash(ch.originalText.join('\n\n'));
+          const detailLevel =
+            metadata?.detailLevel || settings.summaryDetailLevel || 'compact';
+          const cacheKey = buildSummaryCacheKey({
+            contentHash: chHash,
+            chapterId: ch.id,
+            model: metadata?.model || 'gemini-3.8-flash',
+            personaId: settings.authorPersonality,
+            detailLevel,
+            targetPages: ch.compactPages,
+            customTrait: settings.useCustomAuthor
+              ? settings.customAuthorTrait
+              : undefined,
+          });
+
+          setSummaryCache((prevCache) => ({
+            ...prevCache,
+            [cacheKey]: {
+              cacheKey,
+              bookId: b.id,
+              chapterId: ch.id,
+              personaId: settings.authorPersonality,
+              compactText,
+              bulletPoints,
+              metadata: metadata || {
+                status: 'ai_generated',
+                model: 'gemini-3.8-flash',
+                generatedAt: new Date().toISOString(),
+                contentHash: chHash,
+                detailLevel,
+              },
+            },
+          }));
+
           return {
             ...ch,
             isCompressed: true,
+            summaryStatus: metadata?.status || 'ai_generated',
+            summaryMetadata: metadata,
+            summaryErrorMessage: undefined,
             compactText: compactText.length > 0 ? compactText : ch.compactText,
-            bulletPoints: bulletPoints.length > 0 ? bulletPoints : ch.bulletPoints,
+            bulletPoints:
+              bulletPoints.length > 0 ? bulletPoints : ch.bulletPoints,
             personaCompactCache: {
               ...(ch.personaCompactCache || {}),
               [personaKey]: compactText,
@@ -331,7 +546,8 @@ export default function App() {
         const updatedMasterBullets = updatedChapters.map(
           (c) =>
             `${c.title}: ${
-              c.bulletPoints[0] || 'Select this chapter in the reader to generate highlights.'
+              c.bulletPoints[0] ||
+              'Select this chapter in the reader to generate AI highlights.'
             }`
         );
 
@@ -344,6 +560,31 @@ export default function App() {
     );
   }
 
+  function handleMarkChapterSummaryFailed(
+    bookId: string,
+    chapterId: string,
+    errorMessage: string
+  ) {
+    setBooks((prevBooks) =>
+      prevBooks.map((b) => {
+        if (b.id !== bookId) return b;
+        return {
+          ...b,
+          chapters: b.chapters.map((ch) =>
+            ch.id === chapterId
+              ? {
+                  ...ch,
+                  isCompressed: false,
+                  summaryStatus: 'failed',
+                  summaryErrorMessage: errorMessage,
+                }
+              : ch
+          ),
+        };
+      })
+    );
+  }
+
   function handleHydrateGutenbergChapters(
     bookId: string,
     extracted: Array<{ number: number; title: string; originalText: string[] }>
@@ -351,21 +592,22 @@ export default function App() {
     setBooks((prevBooks) =>
       prevBooks.map((b) => {
         if (b.id !== bookId) return b;
-        const updatedChapters = b.chapters.map((ch, idx) => {
-          const ext = extracted[idx];
-          if (!ext) return ch;
-          return {
-            ...ch,
-            title: ext.title || ch.title,
-            originalText:
-              ext.originalText && ext.originalText.length >= 2
-                ? ext.originalText
-                : ch.originalText,
-          };
-        });
+        return hydrateBookWithGutenbergChapters(b, extracted);
+      })
+    );
+  }
+
+  function handleMarkGutenbergExtractionFailed(
+    bookId: string,
+    errorMessage: string
+  ) {
+    setBooks((prevBooks) =>
+      prevBooks.map((b) => {
+        if (b.id !== bookId) return b;
         return {
           ...b,
-          chapters: updatedChapters,
+          availabilityStatus: 'extraction_failed',
+          extractionError: errorMessage,
         };
       })
     );
@@ -377,12 +619,29 @@ export default function App() {
     setUploadError(null);
     setIsProcessingUpload(true);
     setUploadedFileName(file.name);
+    setUploadStructuredChapters(undefined);
 
     try {
-      const { text, detectedFormat } = await extractTextFromUploadedFile(file);
-      setUploadFormat(detectedFormat);
-      setUploadRawText(text);
-      if (!uploadTitle.trim()) {
+      const result = await extractTextFromUploadedFile(file);
+      if (
+        result.availabilityStatus === 'extraction_failed' ||
+        result.availabilityStatus === 'unsupported_format'
+      ) {
+        setUploadError(
+          result.errorMessage ||
+            'Could not extract readable text from this file.'
+        );
+        setUploadRawText('');
+        return;
+      }
+
+      setUploadFormat(result.detectedFormat);
+      setUploadRawText(result.text);
+      setUploadStructuredChapters(result.chapters);
+
+      if (result.extractedTitle && !uploadTitle.trim()) {
+        setUploadTitle(result.extractedTitle);
+      } else if (!uploadTitle.trim()) {
         setUploadTitle(
           file.name
             .replace(/\.[^.]+$/, '')
@@ -390,12 +649,17 @@ export default function App() {
             .replace(/\b\w/g, (c) => c.toUpperCase())
         );
       }
-      if (!uploadAuthor.trim()) {
+
+      if (result.extractedAuthor && !uploadAuthor.trim()) {
+        setUploadAuthor(result.extractedAuthor);
+      } else if (!uploadAuthor.trim()) {
         setUploadAuthor('Independent Author');
       }
-    } catch {
+    } catch (err: unknown) {
       setUploadError(
-        'Could not read that file. Please try another EPUB, PDF, or TXT file.'
+        err instanceof Error
+          ? err.message
+          : 'Could not read that file. Please try another EPUB, PDF, or TXT file.'
       );
     } finally {
       setIsProcessingUpload(false);
@@ -408,9 +672,9 @@ export default function App() {
       setUploadError('Please enter a book title.');
       return;
     }
-    if (!uploadRawText.trim() || uploadRawText.trim().length < 60) {
+    if (!uploadRawText.trim() || uploadRawText.trim().length < 40) {
       setUploadError(
-        'Please choose an EPUB/PDF/TXT file or paste your book text.'
+        'Please choose a valid EPUB/PDF/TXT file or paste readable book text (at least 40 characters).'
       );
       return;
     }
@@ -424,16 +688,30 @@ export default function App() {
       uploadRawText,
       uploadFormat,
       settings.authorPersonality,
-      false
+      false,
+      uploadStructuredChapters
     );
+
+    if (
+      newBook.availabilityStatus === 'extraction_failed' ||
+      newBook.chapters.length === 0
+    ) {
+      setIsProcessingUpload(false);
+      setUploadError(
+        newBook.extractionError ||
+          'Extraction failed: no readable chapters were found in the provided text.'
+      );
+      return;
+    }
 
     setBooks((prev) => [newBook, ...prev]);
     setSelectedBookId(newBook.id);
-    setActiveMode('compact');
+    setActiveMode('original');
     setIsProcessingUpload(false);
     setUploadTitle('');
     setUploadAuthor('');
     setUploadRawText('');
+    setUploadStructuredChapters(undefined);
     setUploadedFileName(null);
     navigateToPage('reader');
   }
@@ -444,13 +722,14 @@ export default function App() {
     setUploadFormat('EPUB');
     setUploadedFileName('the-time-machine.epub');
     setUploadError(null);
-    const sample18 = Array.from({ length: 18 }, (_, i) => {
-      return `Chapter ${i + 1}: Part ${i + 1} of the Voyage
-In this chapter, the Time Traveller recounts the next stage of his journey through time, observing how society, nature, and the earth itself transform across the ages.
+    setUploadStructuredChapters(undefined);
+    const sample16 = Array.from({ length: 16 }, (_, i) => {
+      return `Chapter ${i + 1}: Part ${i + 1} of the Temporal Chronicle
+The Time Traveller sat before his guests in the warm firelight of Richmond, holding the gleaming quartz lever of his experimental machine and recounting what he witnessed in the year 802,701.
 
-Each scene builds on the previous chapter’s discoveries while raising new questions about humanity’s future.`;
+Across the terraced gardens of the Eloi and the subterranean shafts of the Morlocks, he traced how evolutionary divergence reshaped humanity across eight hundred millennia.`;
     }).join('\n\n');
-    setUploadRawText(sample18);
+    setUploadRawText(sample16);
   }
 
   const navItems: { id: AppPageRoute; label: string }[] = [
@@ -460,6 +739,15 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
     { id: 'press', label: 'Upload' },
     { id: 'voices', label: 'Voices' },
   ];
+
+  const likedIdsSet = useMemo(
+    () => new Set(tasteProfile.likedBookIds || []),
+    [tasteProfile.likedBookIds]
+  );
+  const dislikedIdsSet = useMemo(
+    () => new Set(tasteProfile.dislikedBookIds || []),
+    [tasteProfile.dislikedBookIds]
+  );
 
   return (
     <div className="min-h-screen bg-jacket-orange text-[#111] flex flex-col">
@@ -571,7 +859,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                   </h1>
 
                   <p className="mt-4 text-sm sm:text-base font-semibold text-[#222] leading-relaxed max-w-md">
-                    Read timeless classics or upload your own books. Switch effortlessly between the original book, chapter-by-chapter compact editions, quick highlights, and narrated audio.
+                    Read timeless public-domain classics or upload your own EPUB, PDF, or TXT books. Switch effortlessly between the original manuscript, chapter-by-chapter AI summaries, highlights, and chunked audiobooks.
                   </p>
 
                   <div className="mt-5 pt-4 border-t-2 border-neutral-300 flex flex-wrap items-center gap-2.5">
@@ -611,11 +899,15 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                 </div>
               </div>
 
-              {/* Currently Reading Card */}
+              {/* Currently Reading Card (Persisted) */}
               <div className="bg-white border-[3px] border-[#111] p-4 shadow-brutal">
                 <div className="flex items-center justify-between text-xs font-mono-tech font-bold text-[#555] pb-2 border-b-2 border-[#111]">
                   <span>CONTINUE READING</span>
-                  <span>{activeBook.chapters.length} CHAPTERS</span>
+                  <span>
+                    {activeBook.chapters.length > 0
+                      ? `CH. ${(readingProgressByBookId[activeBook.id]?.lastChapterIndex ?? 0) + 1} OF ${activeBook.chapters.length}`
+                      : 'METADATA RECORD'}
+                  </span>
                 </div>
                 <div className="mt-3 flex items-center justify-between gap-3.5">
                   <div className="w-14 h-20 border-2 border-[#111] shadow-brutal-sm shrink-0 overflow-hidden bg-[#111]">
@@ -635,7 +927,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                       {activeBook.author}
                     </p>
                     <p className="text-xs font-mono-tech font-bold text-[#E50914] mt-1">
-                      {activeBook.compactTotalPages}-Page Compact Edition
+                      {activeBook.compactTotalPages > 0
+                        ? `${activeBook.compactTotalPages}-Page Compact Edition`
+                        : 'Catalog Entry'}
                     </p>
                   </div>
                   <button
@@ -654,7 +948,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
               <button
                 type="button"
                 onClick={() =>
-                  discoveryDeckRef.current?.scrollIntoView({ behavior: 'smooth' })
+                  discoveryDeckRef.current?.scrollIntoView({
+                    behavior: 'smooth',
+                  })
                 }
                 aria-label="Scroll to Books"
                 className="z-20 flex flex-col items-center group cursor-pointer focus:outline-none"
@@ -664,7 +960,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                 </div>
                 <div className="w-16 h-12 bg-[#0B192C] text-white border-[3px] border-[#111] rounded-md shadow-brutal flex flex-col items-center justify-center group-hover:translate-y-1 transition-transform">
                   <ChevronDown className="w-4 h-4 text-[#F6C90E] -mb-0.5" />
-                  <span className="font-bold text-xs tracking-tight">scroll</span>
+                  <span className="font-bold text-xs tracking-tight">
+                    scroll
+                  </span>
                 </div>
               </button>
 
@@ -730,7 +1028,10 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
               <div className="bg-pocket-red border-[3px] border-[#111] shadow-brutal-lg p-4 sm:p-5 relative">
                 <div className="border-2 border-dashed border-[#111]/60 p-3.5 sm:p-4 bg-white/95 space-y-3.5">
                   {/* Simple Search & Genre Filter */}
-                  <form onSubmit={handleDynamicSearchSubmit} className="space-y-2">
+                  <form
+                    onSubmit={handleDynamicSearchSubmit}
+                    className="space-y-2"
+                  >
                     <div className="flex gap-1.5">
                       <div className="relative flex-1">
                         <Search className="w-4 h-4 text-[#555] absolute left-3 top-1/2 -translate-y-1/2" />
@@ -795,7 +1096,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                             FEATURED BOOK
                           </span>
                           <span className="px-1.5 py-0.5 bg-[#10B981] text-[#111] font-extrabold">
-                            98% MATCH
+                            FULL TEXT · GUTENBERG #{currentFeaturedBook.gutenbergId}
                           </span>
                         </div>
 
@@ -803,7 +1104,8 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                           {currentFeaturedBook.title}
                         </h2>
                         <div className="text-xs font-mono-tech text-[#F6C90E]">
-                          {currentFeaturedBook.author} · {currentFeaturedBook.genre}
+                          {currentFeaturedBook.author} ·{' '}
+                          {currentFeaturedBook.genre}
                         </div>
 
                         <p className="text-xs text-neutral-300 line-clamp-2 mt-1.5 leading-relaxed">
@@ -814,7 +1116,10 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                           <button
                             type="button"
                             onClick={() =>
-                              handleOpenCatalogVolume(currentFeaturedBook, 'compact')
+                              handleOpenCatalogVolume(
+                                currentFeaturedBook,
+                                'original'
+                              )
                             }
                             className="px-3.5 py-1.5 bg-[#F6C90E] text-[#111] font-display-brutal text-xs uppercase border border-white cursor-pointer hover:bg-[#FFE047] flex items-center gap-1.5"
                           >
@@ -847,7 +1152,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                       className="w-8 h-2 bg-[#B8860B] border border-[#111] rounded-full mb-1.5"
                     />
                     <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-xl border-[3px] border-[#111] overflow-hidden shadow-brutal-sm bg-[#FF1493]">
-                      <PersonaPortraitSvg personaId={settings.authorPersonality} />
+                      <PersonaPortraitSvg
+                        personaId={settings.authorPersonality}
+                      />
                     </div>
                   </div>
 
@@ -909,7 +1216,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
           </div>
 
           {/* =================================================================
-              CLEAN, USER-FRIENDLY BOOK SHELVES
+              BOOK SHELVES WITH TRANSPARENT TF-IDF RECS & AVAILABILITY BADGES
              ================================================================= */}
           <div ref={discoveryDeckRef} className="space-y-8 pt-2">
             {/* Search or Genre Filter Results */}
@@ -944,46 +1251,69 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                  {filteredArchiveBooks.slice(0, 18).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleOpenCatalogVolume(item, 'compact')}
-                      className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
-                    >
-                      <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
-                        <BookPosterCover
-                          title={item.title}
-                          author={item.author}
-                          coverUrl={item.coverUrl}
-                        />
+                  {filteredArchiveBooks.slice(0, 18).map((item) => {
+                    const isFullText =
+                      item.availabilityStatus === 'full_text' ||
+                      Boolean(item.gutenbergId);
+                    return (
+                      <div
+                        key={item.id}
+                        className="bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform flex flex-col justify-between overflow-hidden group"
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleOpenCatalogVolume(
+                              item,
+                              isFullText ? 'original' : 'compact'
+                            )
+                          }
+                          className="text-left flex-1 flex flex-col justify-between cursor-pointer"
+                        >
+                          <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
+                            <BookPosterCover
+                              title={item.title}
+                              author={item.author}
+                              coverUrl={item.coverUrl}
+                            />
+                            <span
+                              className={`absolute top-2 right-2 z-20 px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold border border-[#111] ${
+                                isFullText
+                                  ? 'bg-[#10B981] text-[#111]'
+                                  : 'bg-[#F97316] text-[#111]'
+                              }`}
+                            >
+                              {isFullText ? 'FULL TEXT' : 'METADATA ONLY'}
+                            </span>
+                          </div>
+                          <div className="p-2.5 flex-1 flex flex-col justify-between">
+                            <div>
+                              <div className="font-mono-tech text-[10px] font-bold text-[#E50914] uppercase truncate">
+                                {item.genre}
+                              </div>
+                              <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
+                                {item.title}
+                              </div>
+                              <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
+                                {item.author}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
                       </div>
-                      <div className="p-2.5 flex-1 flex flex-col justify-between">
-                        <div>
-                          <div className="font-mono-tech text-[10px] font-bold text-[#E50914] uppercase truncate">
-                            {item.genre}
-                          </div>
-                          <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
-                            {item.title}
-                          </div>
-                          <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
-                            {item.author}
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             )}
 
-            {/* SHELF 1: PICKED FOR YOU (ML RECOMMENDATIONS) */}
+            {/* SHELF 1: PICKED FOR YOU (TF-IDF + COSINE SIMILARITY + MMR DIVERSITY) */}
             <section className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-[3px] border-[#111]">
                 <div>
                   <div className="flex items-center gap-1.5 text-xs font-mono-tech font-bold text-[#0047FF]">
                     <Sparkles className="w-4 h-4" />
-                    <span>PERSONALIZED RECOMMENDATIONS</span>
+                    <span>TF-IDF + COSINE SIMILARITY RECOMMENDATIONS</span>
                   </div>
                   <h2 className="font-display-brutal text-xl sm:text-2xl uppercase text-[#111] mt-0.5">
                     Picked for You
@@ -999,42 +1329,87 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                {mlRecommendations.slice(0, 6).map(({ book, matchPercentage }) => {
-                  const ext = book as ExternalCatalogBook;
-                  return (
-                    <button
-                      key={ext.id}
-                      type="button"
-                      onClick={() => handleOpenCatalogVolume(ext, 'compact')}
-                      className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
-                    >
-                      <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
-                        <BookPosterCover
-                          title={ext.title}
-                          author={ext.author}
-                          coverUrl={ext.coverUrl}
-                        />
-                        <span className="absolute top-2 left-2 z-20 bg-[#10B981] text-[#111] border-2 border-[#111] px-1.5 py-0.5 font-mono-tech text-[10px] font-extrabold shadow-brutal-sm">
-                          {matchPercentage}% Match
-                        </span>
-                      </div>
+                {mlRecommendations
+                  .slice(0, 6)
+                  .map(({ book, matchPercentage, explanationReasons }) => {
+                    const ext = book as ExternalCatalogBook;
+                    const isLiked = likedIdsSet.has(ext.id);
+                    const isDisliked = dislikedIdsSet.has(ext.id);
+                    const primaryExplanation =
+                      explanationReasons?.[0]?.label ||
+                      `Shared genre: ${ext.genre}`;
+                    return (
+                      <div
+                        key={ext.id}
+                        className="bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform flex flex-col justify-between overflow-hidden group"
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleOpenCatalogVolume(ext, 'original')
+                          }
+                          className="text-left flex-1 flex flex-col justify-between cursor-pointer"
+                        >
+                          <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
+                            <BookPosterCover
+                              title={ext.title}
+                              author={ext.author}
+                              coverUrl={ext.coverUrl}
+                            />
+                            <span className="absolute top-2 left-2 z-20 bg-[#10B981] text-[#111] border-2 border-[#111] px-1.5 py-0.5 font-mono-tech text-[10px] font-extrabold shadow-brutal-sm">
+                              {matchPercentage}% Match
+                            </span>
+                          </div>
 
-                      <div className="p-2.5 flex-1 flex flex-col justify-between">
-                        <div>
-                          <div className="font-mono-tech text-[10px] font-bold text-[#0047FF] uppercase truncate">
-                            {ext.genre}
+                          <div className="p-2.5 flex-1 flex flex-col justify-between">
+                            <div>
+                              <div className="font-mono-tech text-[10px] font-bold text-[#0047FF] uppercase truncate">
+                                {ext.genre}
+                              </div>
+                              <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
+                                {ext.title}
+                              </div>
+                              <div className="text-[11px] font-semibold text-[#444] truncate">
+                                {ext.author}
+                              </div>
+                              <div className="mt-1.5 pt-1.5 border-t border-neutral-200 font-mono-tech text-[10px] text-[#059669] line-clamp-2 leading-snug">
+                                {primaryExplanation}
+                              </div>
+                            </div>
                           </div>
-                          <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
-                            {ext.title}
-                          </div>
-                          <div className="text-[11px] font-semibold text-[#444] truncate">
-                            {ext.author}
-                          </div>
+                        </button>
+
+                        {/* Explicit Like / Dislike Feedback Bar */}
+                        <div className="px-2.5 py-1.5 bg-[#F3EFE6] border-t-2 border-[#111] flex items-center justify-between gap-1">
+                          <button
+                            type="button"
+                            aria-label={`Like ${ext.title}`}
+                            onClick={(e) => handleToggleLikeBook(ext.id, e)}
+                            className={`flex-1 py-1 px-1.5 border border-[#111] font-mono-tech text-[10px] font-bold flex items-center justify-center gap-1 cursor-pointer ${
+                              isLiked
+                                ? 'bg-[#10B981] text-[#111]'
+                                : 'bg-white text-[#111] hover:bg-neutral-100'
+                            }`}
+                          >
+                            <ThumbsUp className="w-3 h-3" />
+                            <span>{isLiked ? 'Liked' : 'Like'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Pass on ${ext.title}`}
+                            onClick={(e) => handleToggleDislikeBook(ext.id, e)}
+                            className={`py-1 px-2 border border-[#111] font-mono-tech text-[10px] font-bold flex items-center justify-center cursor-pointer ${
+                              isDisliked
+                                ? 'bg-[#E50914] text-white'
+                                : 'bg-white text-[#111] hover:bg-neutral-100'
+                            }`}
+                          >
+                            <ThumbsDown className="w-3 h-3" />
+                          </button>
                         </div>
                       </div>
-                    </button>
-                  );
-                })}
+                    );
+                  })}
               </div>
             </section>
 
@@ -1064,7 +1439,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => handleOpenCatalogVolume(item, 'compact')}
+                    onClick={() => handleOpenCatalogVolume(item, 'original')}
                     className="text-left bg-neutral-900 border-2 border-neutral-600 hover:border-[#F6C90E] transition-all cursor-pointer flex flex-col justify-between overflow-hidden group relative"
                   >
                     <div className="w-full aspect-[2/3] border-b border-neutral-700 relative bg-black overflow-hidden">
@@ -1125,6 +1500,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                         coverColor={b.coverColor}
                         coverAccent={b.coverAccent}
                       />
+                      <span className="absolute top-2 right-2 z-20 bg-[#F6C90E] text-[#111] border border-[#111] px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold">
+                        CURATED
+                      </span>
                     </div>
 
                     <div className="p-2.5 flex-1 flex flex-col justify-between">
@@ -1150,7 +1528,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-[3px] border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    ESSENTIAL READING
+                    VERIFIED PUBLIC DOMAIN ARCHIVE
                   </span>
                   <h2 className="font-display-brutal text-xl sm:text-2xl uppercase text-[#111] mt-0.5">
                     World Classics
@@ -1170,7 +1548,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => handleOpenCatalogVolume(item, 'compact')}
+                    onClick={() => handleOpenCatalogVolume(item, 'original')}
                     className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
                   >
                     <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
@@ -1179,6 +1557,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                         author={item.author}
                         coverUrl={item.coverUrl}
                       />
+                      <span className="absolute top-2 right-2 z-20 bg-[#10B981] text-[#111] border border-[#111] px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold">
+                        FULL TEXT
+                      </span>
                     </div>
 
                     <div className="p-2.5 flex-1 flex flex-col justify-between">
@@ -1214,11 +1595,14 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                   Browse Library
                 </h1>
                 <p className="text-xs sm:text-sm font-semibold text-[#333] mt-1">
-                  Search by title, author, or genre. Click any book to read or listen.
+                  Search public-domain full texts (Project Gutenberg) and discovery records (Google Books). Every card displays its verified availability status.
                 </p>
               </div>
 
-              <form onSubmit={handleDynamicSearchSubmit} className="flex gap-2 w-full sm:w-auto">
+              <form
+                onSubmit={handleDynamicSearchSubmit}
+                className="flex gap-2 w-full sm:w-auto"
+              >
                 <input
                   type="text"
                   value={searchQuery}
@@ -1265,7 +1649,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
           <div className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-2 border-[#111]">
               <span className="font-display-brutal text-sm uppercase">
-                {filteredArchiveBooks.length} Books
+                {filteredArchiveBooks.length} Books Indexed
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -1297,36 +1681,80 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                {filteredArchiveBooks.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => handleOpenCatalogVolume(item, 'compact')}
-                    className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
-                  >
-                    <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
-                      <BookPosterCover
-                        title={item.title}
-                        author={item.author}
-                        coverUrl={item.coverUrl}
-                      />
-                    </div>
+                {filteredArchiveBooks.map((item) => {
+                  const isFullText =
+                    item.availabilityStatus === 'full_text' ||
+                    Boolean(item.gutenbergId);
+                  const isLiked = likedIdsSet.has(item.id);
+                  return (
+                    <div
+                      key={item.id}
+                      className="bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform flex flex-col justify-between overflow-hidden group"
+                    >
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleOpenCatalogVolume(
+                            item,
+                            isFullText ? 'original' : 'compact'
+                          )
+                        }
+                        className="text-left flex-1 flex flex-col justify-between cursor-pointer"
+                      >
+                        <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
+                          <BookPosterCover
+                            title={item.title}
+                            author={item.author}
+                            coverUrl={item.coverUrl}
+                          />
+                          <span
+                            className={`absolute top-2 right-2 z-20 px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold border border-[#111] ${
+                              isFullText
+                                ? 'bg-[#10B981] text-[#111]'
+                                : 'bg-[#F97316] text-[#111]'
+                            }`}
+                          >
+                            {isFullText ? 'FULL TEXT' : 'METADATA ONLY'}
+                          </span>
+                        </div>
 
-                    <div className="p-2.5 flex-1 flex flex-col justify-between">
-                      <div>
-                        <div className="font-mono-tech text-[10px] font-bold text-[#0047FF] uppercase truncate">
-                          {item.genre}
+                        <div className="p-2.5 flex-1 flex flex-col justify-between">
+                          <div>
+                            <div className="font-mono-tech text-[10px] font-bold text-[#0047FF] uppercase truncate">
+                              {item.genre}
+                            </div>
+                            <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
+                              {item.title}
+                            </div>
+                            <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
+                              {item.author}
+                            </div>
+                            <div className="text-[10px] font-mono-tech text-[#666] truncate mt-1">
+                              {isFullText
+                                ? `Project Gutenberg #${item.gutenbergId}`
+                                : 'Google Books Metadata'}
+                            </div>
+                          </div>
                         </div>
-                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
-                          {item.title}
-                        </div>
-                        <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
-                          {item.author}
-                        </div>
+                      </button>
+
+                      <div className="px-2.5 py-1.5 bg-[#F3EFE6] border-t-2 border-[#111] flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          onClick={(e) => handleToggleLikeBook(item.id, e)}
+                          className={`flex-1 py-1 px-1.5 border border-[#111] font-mono-tech text-[10px] font-bold flex items-center justify-center gap-1 cursor-pointer ${
+                            isLiked
+                              ? 'bg-[#10B981] text-[#111]'
+                              : 'bg-white text-[#111] hover:bg-neutral-100'
+                          }`}
+                        >
+                          <ThumbsUp className="w-3 h-3" />
+                          <span>{isLiked ? 'Saved' : 'Like'}</span>
+                        </button>
                       </div>
                     </div>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1345,8 +1773,14 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
             onUpdateBookChapter={handleUpdateBookChapter}
+            onMarkChapterSummaryFailed={handleMarkChapterSummaryFailed}
             onHydrateGutenbergChapters={handleHydrateGutenbergChapters}
+            onMarkGutenbergExtractionFailed={handleMarkGutenbergExtractionFailed}
+            readingProgress={readingProgressByBookId[activeBook.id]}
+            onUpdateReadingProgress={handleUpdateReadingProgress}
+            summaryCache={summaryCache}
             onOpenSettingsTab={() => navigateToPage('voices')}
+            onOpenUploadTab={() => navigateToPage('press')}
             onBackToCatalog={() => navigateToPage('home')}
           />
         </main>
@@ -1366,7 +1800,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                       Upload Your Book
                     </h1>
                     <p className="text-xs sm:text-sm text-[#444] mt-1">
-                      Upload an EPUB, PDF, or TXT file to read chapter-by-chapter summaries, highlights, and audio.
+                      Upload an EPUB (OPF spine parser), PDF (page-aware text extractor with OCR check), or TXT file.
                     </p>
                   </div>
                   <button
@@ -1397,6 +1831,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                   {uploadedFileName && (
                     <span className="font-mono-tech text-xs font-bold text-[#059669]">
                       Selected: {uploadedFileName}
+                      {uploadStructuredChapters
+                        ? ` (${uploadStructuredChapters.length} verified chapters extracted)`
+                        : ''}
                     </span>
                   )}
                 </div>
@@ -1447,7 +1884,10 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                     id="upload-book-manuscript"
                     rows={7}
                     value={uploadRawText}
-                    onChange={(e) => setUploadRawText(e.target.value)}
+                    onChange={(e) => {
+                      setUploadRawText(e.target.value);
+                      setUploadStructuredChapters(undefined);
+                    }}
                     placeholder="Choose a file above, click 'Try Sample Book', or paste chapters here..."
                     className="w-full p-3 bg-white border-2 border-[#111] text-xs font-mono-tech focus:outline-none"
                   />
@@ -1467,7 +1907,9 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
                   disabled={isProcessingUpload}
                   className="w-full py-3 bg-[#111] text-[#F6C90E] hover:bg-[#222] font-display-brutal text-sm uppercase border-2 border-[#111] shadow-brutal cursor-pointer disabled:opacity-50"
                 >
-                  {isProcessingUpload ? 'Adding Book...' : 'Open Book in Reader →'}
+                  {isProcessingUpload
+                    ? 'Extracting & Verifying Book...'
+                    : 'Open Book in Reader →'}
                 </button>
               </form>
             </div>
@@ -1664,7 +2106,13 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
         </main>
       )}
 
-      <DotFooter appName="The Readers Club" navItems={navItems} onNavigate={navigateToPage} />
+      <MascotChatWidget activeBook={activeBook} settings={settings} />
+
+      <DotFooter
+        appName="The Readers Club"
+        navItems={navItems}
+        onNavigate={navigateToPage}
+      />
 
       <OfflineIndicator />
     </div>

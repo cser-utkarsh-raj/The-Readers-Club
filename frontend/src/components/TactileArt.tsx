@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import { PresetPersonalityId } from '../types/book';
 
 import homelanderImg from '../assets/images/persona_homelander_1793777131487.jpg';

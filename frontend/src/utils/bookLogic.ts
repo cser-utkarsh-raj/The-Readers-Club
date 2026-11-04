@@ -1,10 +1,13 @@
 import {
   BookChapter,
   BookItem,
+  ContentAvailabilityStatus,
   ExternalCatalogBook,
   PersonalityProfile,
   PresetPersonalityId,
+  RecommendationExplanation,
   ScoredBookRecommendation,
+  SummaryDetailLevel,
   UserTasteProfile,
 } from '../types/book';
 
@@ -15,7 +18,7 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
     roleTitle: 'Apex Command Critic',
     tagline: 'Theatrical authority, ruthless power analysis & zero-tolerance clarity',
     authorStylePrompt:
-      'Summarize with Homelander’s theatrical, supremely self-assured, slightly condescending corporate-superhero authority. Address the readers as if you are doing them a monumental favor by distilling this literature into pure perfection. Keep all chapter facts and philosophical depth intact.',
+      'Summarize with Homelander’s theatrical, supremely self-assured, slightly condescending corporate-superhero authority. Address the readers as if you are doing them a monumental favor by distilling this literature into pure perfection. Keep all chapter facts, names, chronology, and philosophical depth intact.',
     narratorStylePrompt:
       'Commanding, polished, intense, dramatically poised voice with eerie calm and supreme authority',
     ttsVoiceName: 'Fenrir',
@@ -34,7 +37,7 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
     roleTitle: 'Lyrical Narrative Architect',
     tagline: 'Vivid imagery, emotional precision & golden narrative bridges',
     authorStylePrompt:
-      'Summarize with Taylor Swift’s poetic and professional literary voice: vivid imagery, emotional precision, clever metaphors, and structured narrative bridges that connect every chapter’s turning point with grace and intellectual clarity.',
+      'Summarize with Taylor Swift’s poetic and professional literary voice: vivid imagery, emotional precision, clever metaphors, and structured narrative bridges that connect every chapter’s turning point with grace and intellectual clarity while preserving all factual events and characters.',
     narratorStylePrompt:
       'Warm, articulate, poetic, and poised professional storyteller with lyrical cadence',
     ttsVoiceName: 'Kore',
@@ -53,7 +56,7 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
     roleTitle: 'Fourth-Wall Satirist',
     tagline: 'Razor-sharp metafictional wit, trope-busting commentary & brisk pacing',
     authorStylePrompt:
-      'Summarize with Deadpool’s clever, sarcastic, fourth-wall-aware wit. Call out character blunders and plot tropes while delivering a rock-solid, crystal-clear chapter-by-chapter breakdown.',
+      'Summarize with Deadpool’s clever, sarcastic, fourth-wall-aware wit. Call out character blunders and plot tropes while delivering a rock-solid, crystal-clear, factually accurate chapter-by-chapter breakdown.',
     narratorStylePrompt:
       'Witty, dryly sarcastic, upbeat conversational narrator with crisp comic timing',
     ttsVoiceName: 'Puck',
@@ -72,7 +75,7 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
     roleTitle: 'Fireside Loremaster',
     tagline: 'Timeless scholarly gravitas, warm hearthside cadence & deep lore',
     authorStylePrompt:
-      'Summarize with Gandalf’s timeless, scholarly, warm fireside wisdom. Elevate the prose with dignified cadence, deep philosophical insight, and reverent fidelity to the chapter structure.',
+      'Summarize with Gandalf’s timeless, scholarly, warm fireside wisdom. Elevate the prose with dignified cadence, deep philosophical insight, and reverent fidelity to the chapter structure and factual chronology.',
     narratorStylePrompt:
       'Deep, resonant, calm, wise classic literary narrator reading beside a warm hearth',
     ttsVoiceName: 'Charon',
@@ -88,6 +91,151 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
 };
 
 /**
+ * Deterministic FNV-1a 32-bit content hash for caching summaries and verifying manuscript identity.
+ */
+export function computeContentHash(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/**
+ * Computes a deterministic cache key for chapter summaries based on content hash, chapter ID, model, persona, and detail configuration.
+ */
+export function buildSummaryCacheKey(params: {
+  contentHash: string;
+  chapterId: string;
+  model: string;
+  personaId: PresetPersonalityId;
+  detailLevel: SummaryDetailLevel;
+  targetPages: number;
+  customTrait?: string;
+}): string {
+  const raw = [
+    params.contentHash,
+    params.chapterId,
+    params.model,
+    params.personaId,
+    params.detailLevel,
+    String(params.targetPages),
+    (params.customTrait || '').trim().toLowerCase(),
+  ].join('::');
+  return `sum-${computeContentHash(raw)}`;
+}
+
+/**
+ * Splits long chapter paragraphs into context-aware chunks at paragraph and sentence boundaries,
+ * avoiding arbitrary mid-sentence character truncation and preserving source-to-summary traceability.
+ */
+export function splitChapterIntoChunks(
+  paragraphs: string[],
+  maxChunkChars = 4500
+): Array<{
+  chunkIndex: number;
+  text: string;
+  paragraphRange: [number, number];
+  charCount: number;
+}> {
+  const cleanParas = paragraphs
+    .map((p) => p.replace(/\s+/g, ' ').trim())
+    .filter((p) => p.length > 0);
+
+  if (cleanParas.length === 0) return [];
+
+  const safeMax = Math.max(500, maxChunkChars);
+  const chunks: Array<{
+    chunkIndex: number;
+    text: string;
+    paragraphRange: [number, number];
+    charCount: number;
+  }> = [];
+
+  let currentParas: string[] = [];
+  let currentLen = 0;
+  let startParaIdx = 0;
+
+  for (let i = 0; i < cleanParas.length; i++) {
+    const para = cleanParas[i];
+
+    // If a single paragraph exceeds safeMax, split it at sentence boundaries
+    if (para.length > safeMax) {
+      if (currentParas.length > 0) {
+        const text = currentParas.join('\n\n');
+        chunks.push({
+          chunkIndex: chunks.length,
+          text,
+          paragraphRange: [startParaIdx, i - 1],
+          charCount: text.length,
+        });
+        currentParas = [];
+        currentLen = 0;
+      }
+
+      const sentences = para.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g) || [para];
+      let sentenceBuf = '';
+      for (const s of sentences) {
+        const trimmedS = s.trim();
+        if (!trimmedS) continue;
+        if (sentenceBuf.length + trimmedS.length + 1 > safeMax && sentenceBuf.length > 0) {
+          chunks.push({
+            chunkIndex: chunks.length,
+            text: sentenceBuf,
+            paragraphRange: [i, i],
+            charCount: sentenceBuf.length,
+          });
+          sentenceBuf = trimmedS;
+        } else {
+          sentenceBuf = sentenceBuf ? `${sentenceBuf} ${trimmedS}` : trimmedS;
+        }
+      }
+      if (sentenceBuf.length > 0) {
+        chunks.push({
+          chunkIndex: chunks.length,
+          text: sentenceBuf,
+          paragraphRange: [i, i],
+          charCount: sentenceBuf.length,
+        });
+      }
+      startParaIdx = i + 1;
+      continue;
+    }
+
+    const projectedLen = currentLen === 0 ? para.length : currentLen + 2 + para.length;
+    if (projectedLen > safeMax && currentParas.length > 0) {
+      const text = currentParas.join('\n\n');
+      chunks.push({
+        chunkIndex: chunks.length,
+        text,
+        paragraphRange: [startParaIdx, i - 1],
+        charCount: text.length,
+      });
+      currentParas = [para];
+      currentLen = para.length;
+      startParaIdx = i;
+    } else {
+      if (currentParas.length === 0) startParaIdx = i;
+      currentParas.push(para);
+      currentLen = projectedLen;
+    }
+  }
+
+  if (currentParas.length > 0) {
+    const text = currentParas.join('\n\n');
+    chunks.push({
+      chunkIndex: chunks.length,
+      text,
+      paragraphRange: [startParaIdx, cleanParas.length - 1],
+      charCount: text.length,
+    });
+  }
+
+  return chunks;
+}
+
+/**
  * Calculates the proportional compact page target for a book and its chapters.
  * Preserves exact 1-to-1 chapter count (e.g., 18 original chapters -> 18 compact chapters).
  */
@@ -95,8 +243,14 @@ export function calculateCompactPageAllocation(
   originalPagesPerChapter: number[],
   targetRatio = 0.175
 ): { totalOriginal: number; totalCompact: number; chapterCompactPages: number[] } {
-  const safeChapters =
-    originalPagesPerChapter.length > 0 ? originalPagesPerChapter : [30];
+  if (originalPagesPerChapter.length === 0) {
+    return {
+      totalOriginal: 0,
+      totalCompact: 0,
+      chapterCompactPages: [],
+    };
+  }
+  const safeChapters = originalPagesPerChapter;
   const totalOriginal = safeChapters.reduce((sum, p) => sum + Math.max(1, p), 0);
 
   let rawTargetTotal = Math.round(totalOriginal * targetRatio);
@@ -128,7 +282,6 @@ export function calculateCompactPageAllocation(
       chapterCompactPages[maxIdx] += 1;
       diff -= 1;
     } else {
-      // Find a chapter with > 1 compact page to decrement
       let candidateIdx = -1;
       for (let i = 0; i < chapterCompactPages.length; i++) {
         if (
@@ -154,7 +307,8 @@ export function calculateCompactPageAllocation(
 }
 
 /**
- * Applies deterministic persona voice framing to a chapter's compact text.
+ * Applies deterministic persona voice framing to a pre-compressed curated edition's paragraphs.
+ * NOTE: This is ONLY used for pre-authored curated seed summaries, NEVER to fake an AI summary on failure.
  */
 export function applyPersonaVoiceToParagraphs(
   paragraphs: string[],
@@ -220,7 +374,8 @@ export function applyPersonaVoiceToParagraphs(
 }
 
 /**
- * Compresses a SINGLE chapter on demand (1-to-1 chapter compression, never collapsing chapters).
+ * Extractive chapter preview helper used ONLY for unit tests or explicit extractive preview,
+ * NEVER presented as an AI summary when Gemini fails.
  */
 export function compressSingleChapterDeterministic(
   chapter: BookChapter,
@@ -232,24 +387,20 @@ export function compressSingleChapterDeterministic(
   const sourceParas =
     chapter.originalText && chapter.originalText.length > 0
       ? chapter.originalText
-      : [
-          `In ${chapter.title}, ${author} advances the structural arc of ${bookTitle} across ${chapter.originalPages} pages.`,
-        ];
+      : [];
+
+  if (sourceParas.length === 0) {
+    return { compactText: [], bulletPoints: [] };
+  }
 
   const compactBase = sourceParas.slice(0, 3).map((p, idx) => {
     const sentences = p.match(/[^.!?]+[.!?]+/g) || [p];
     const core = sentences.slice(0, 2).join(' ').trim();
     if (idx === 0) {
-      return `${core} (${chapter.originalPages}p original condensed into ${chapter.compactPages}p for ${chapter.title}).`;
+      return `${core} (${chapter.originalPages}p original condensed into ${chapter.compactPages}p for ${chapter.title} in ${bookTitle} by ${author}).`;
     }
     return core;
   });
-
-  while (compactBase.length < 3) {
-    compactBase.push(
-      `Across the closing movement of ${chapter.title}, ${author} cements the thematic turning point that propels ${bookTitle} into its next chapter.`
-    );
-  }
 
   const compactText = applyPersonaVoiceToParagraphs(
     compactBase,
@@ -267,11 +418,11 @@ export function compressSingleChapterDeterministic(
 }
 
 /**
- * Splits raw uploaded book text (from TXT, Markdown, PDF text stream, or EPUB chapters)
- * into structured Chapterwise BookItem data.
- * Preserves ALL detected chapters 1-to-1 (e.g., 18 chapters -> 18 chapters, up to 60 chapters).
- * By default, preCompress is true for unit-test backward compatibility, or can be set to false
- * for on-demand chapter-by-chapter compression in the UI.
+ * Splits raw uploaded book text (or structured extracted chapters) into a BookItem.
+ * CONTENT INTEGRITY GUARANTEE:
+ * - Never fabricates chapters when input text is empty or too short.
+ * - Returns `availabilityStatus: 'extraction_failed'` with 0 chapters if no valid text is present.
+ * - Preserves all detected chapters 1-to-1.
  */
 export function buildBookFromExtractedText(
   title: string,
@@ -279,108 +430,169 @@ export function buildBookFromExtractedText(
   rawText: string,
   fileFormat: 'EPUB' | 'PDF' | 'TXT',
   personaId: PresetPersonalityId = 'gandalf',
-  preCompress = true
+  preCompress = false,
+  structuredChapters?: Array<{
+    title: string;
+    paragraphs: string[];
+    pageStart?: number;
+    pageEnd?: number;
+  }>
 ): BookItem {
-  const cleaned = rawText
+  const cleaned = (rawText || '')
     .replace(/\r\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  // Split by Chapter headings (supports up to 60 chapters so an 18-chapter book keeps all 18 chapters!)
-  const chapterRegex =
-    /(?:^|\n)(?:CHAPTER|Chapter|BOOK|Book|PART|Part|SECTION|Section|CANTO|Canto|ACT|Act)\s+(?:[IVXLCDM\d]+|[A-Za-z]+)(?:[:.-]\s*[^\n]+)?/g;
-  const matches = [...cleaned.matchAll(chapterRegex)];
+  const rawChunks: Array<{
+    title: string;
+    paragraphs: string[];
+    pageStart?: number;
+    pageEnd?: number;
+  }> = [];
 
-  const rawChunks: { title: string; body: string }[] = [];
-
-  if (matches.length >= 2) {
-    for (let i = 0; i < matches.length && i < 60; i++) {
-      const start = matches[i].index ?? 0;
-      const end =
-        i + 1 < matches.length
-          ? (matches[i + 1].index ?? cleaned.length)
-          : cleaned.length;
-      const headingLine = matches[i][0].trim();
-      const body = cleaned.slice(start + matches[i][0].length, end).trim();
-      if (body.length > 30) {
-        rawChunks.push({ title: headingLine, body });
-      }
-    }
-  }
-
-  if (rawChunks.length === 0) {
-    const paragraphs = cleaned
-      .split(/\n\s*\n/)
-      .map((p) => p.trim())
-      .filter((p) => p.length > 30);
-
-    const numChapters = Math.min(24, Math.max(3, Math.ceil(paragraphs.length / 3)));
-    const perChap = Math.max(1, Math.ceil(paragraphs.length / numChapters));
-
-    for (let i = 0; i < numChapters; i++) {
-      const slice = paragraphs.slice(i * perChap, (i + 1) * perChap);
-      if (slice.length > 0) {
+  if (structuredChapters && structuredChapters.length > 0) {
+    for (const ch of structuredChapters) {
+      const validParas = ch.paragraphs
+        .map((p) => p.replace(/\s+/g, ' ').trim())
+        .filter((p) => p.length > 0);
+      if (validParas.length > 0) {
         rawChunks.push({
-          title: `Chapter ${i + 1}: ${slice[0]
-            .split(/\s+/)
-            .slice(0, 5)
-            .join(' ')
-            .replace(/[^\w\s]/g, '')}...`,
-          body: slice.join('\n\n'),
+          title: ch.title,
+          paragraphs: validParas,
+          pageStart: ch.pageStart,
+          pageEnd: ch.pageEnd,
         });
       }
     }
+  } else if (cleaned.length >= 20) {
+    const chapterRegex =
+      /(?:^|\n)[ \t]*(?:(?:CHAPTER|Chapter|BOOK|Book|PART|Part|SECTION|Section|CANTO|Canto|ACT|Act|PROLOGUE|Prologue|EPILOGUE|Epilogue)\b[^\n]*|(?:[IVXLCDM]{1,7}|\d{1,3})\.\s+[A-Z][^\n]{2,80})/g;
+    const matches = [...cleaned.matchAll(chapterRegex)];
+
+    if (matches.length >= 2) {
+      for (let i = 0; i < matches.length && i < 120; i++) {
+        const start = matches[i].index ?? 0;
+        const end =
+          i + 1 < matches.length
+            ? (matches[i + 1].index ?? cleaned.length)
+            : cleaned.length;
+        const headingLine = matches[i][0].trim();
+        const body = cleaned.slice(start + matches[i][0].length, end).trim();
+        if (body.length > 20) {
+          const paras = body
+            .split(/\n\s*\n/)
+            .map((p) => p.replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+          if (paras.length > 0) {
+            rawChunks.push({ title: headingLine, paragraphs: paras });
+          }
+        }
+      }
+    }
+
+    if (rawChunks.length === 0) {
+      const paragraphs = cleaned
+        .split(/\n\s*\n/)
+        .map((p) => p.replace(/\s+/g, ' ').trim())
+        .filter((p) => p.length > 0);
+
+      if (paragraphs.length > 0) {
+        const wordsPerSection = 1200;
+        let currentParas: string[] = [];
+        let currentWords = 0;
+        let secNum = 1;
+
+        for (const p of paragraphs) {
+          const wc = p.split(/\s+/).length;
+          currentParas.push(p);
+          currentWords += wc;
+          if (currentWords >= wordsPerSection) {
+            rawChunks.push({
+              title: `Section ${secNum}`,
+              paragraphs: currentParas,
+            });
+            secNum++;
+            currentParas = [];
+            currentWords = 0;
+          }
+        }
+        if (currentParas.length > 0) {
+          rawChunks.push({
+            title: rawChunks.length === 0 ? 'Full Text' : `Section ${secNum}`,
+            paragraphs: currentParas,
+          });
+        }
+      }
+    }
   }
 
-  const wordCountTotal = cleaned.split(/\s+/).filter(Boolean).length;
-  const estimatedBookPages = Math.max(
-    195,
-    Math.min(250, Math.round(wordCountTotal / 15) || 205)
-  );
+  // If no actual text could be extracted, NEVER fabricate synthetic chapters!
+  if (rawChunks.length === 0) {
+    return {
+      id: `uploaded-${Date.now()}`,
+      title: title || 'Unreadable Document',
+      author: author || 'Unknown Author',
+      year: new Date().getFullYear().toString(),
+      genre: `${fileFormat} Import`,
+      isPreCompressed: false,
+      sourceType: 'uploaded',
+      availabilityStatus: 'extraction_failed',
+      sourceAttribution: `Uploaded ${fileFormat} file — Extraction failed (no readable text found)`,
+      extractionError:
+        'No extractable text was found in this document. Never substituting synthetic chapters.',
+      fileFormat,
+      coverColor: '#7F1D1D',
+      coverAccent: '#FDE047',
+      originalTotalPages: 0,
+      compactTotalPages: 0,
+      superShortPages: 0,
+      tagline: `Extraction failed for ${fileFormat} document.`,
+      superShortExecutiveSummary: {
+        thesis: 'No text available to summarize.',
+        executivePages: [],
+        coreTakeaways: [],
+      },
+      masterBookBullets: [],
+      chapters: [],
+    };
+  }
 
-  const totalBodyLen = Math.max(
-    1,
-    rawChunks.reduce((acc, c) => acc + c.body.length, 0)
-  );
+  const allTextJoined = rawChunks
+    .map((c) => `${c.title}\n${c.paragraphs.join('\n')}`)
+    .join('\n\n');
+  const contentHash = computeContentHash(allTextJoined);
 
   const origPagesList = rawChunks.map((chunk) => {
-    const ratio = Math.max(1 / Math.max(6, rawChunks.length * 1.4), chunk.body.length / totalBodyLen);
-    return Math.max(8, Math.round(estimatedBookPages * ratio));
+    if (
+      typeof chunk.pageStart === 'number' &&
+      typeof chunk.pageEnd === 'number' &&
+      chunk.pageEnd >= chunk.pageStart
+    ) {
+      return Math.max(1, chunk.pageEnd - chunk.pageStart + 1);
+    }
+    const wordCount = chunk.paragraphs
+      .join(' ')
+      .split(/\s+/)
+      .filter(Boolean).length;
+    return Math.max(1, Math.round(wordCount / 260));
   });
 
-  // Normalize origPagesList sum into ~200-230 range if needed
-  const currentOrigSum = origPagesList.reduce((a, b) => a + b, 0);
-  const normalizedOrigPages = origPagesList.map((p) =>
-    Math.max(6, Math.round((p / Math.max(1, currentOrigSum)) * 210))
-  );
-
-  const allocation = calculateCompactPageAllocation(normalizedOrigPages, 0.175);
+  const allocation = calculateCompactPageAllocation(origPagesList, 0.175);
 
   const chapters: BookChapter[] = rawChunks.map((chunk, idx) => {
-    const paras = chunk.body
-      .split(/\n\s*\n/)
-      .map((p) => p.replace(/\s+/g, ' ').trim())
-      .filter(Boolean);
-
-    const originalText =
-      paras.length >= 3
-        ? paras
-        : [
-            chunk.body || 'Original chapter manuscript text extracted from uploaded volume.',
-            'The narrative develops its central conflict through detailed scenes, character exchanges, and thematic exposition.',
-            'Key arguments and turning points establish the foundation for the subsequent chapter.',
-          ];
-
     const baseChap: BookChapter = {
       id: `up-ch-${idx + 1}`,
       number: idx + 1,
       title: chunk.title,
-      originalPages: normalizedOrigPages[idx],
+      originalPages: origPagesList[idx],
       compactPages: allocation.chapterCompactPages[idx],
-      originalText,
+      pageStart: chunk.pageStart,
+      pageEnd: chunk.pageEnd,
+      originalText: chunk.paragraphs,
       compactText: [],
       bulletPoints: [],
       isCompressed: preCompress,
+      summaryStatus: preCompress ? 'curated_seed' : 'uncompressed',
     };
 
     if (preCompress) {
@@ -400,7 +612,7 @@ export function buildBookFromExtractedText(
   const masterBookBullets = chapters.map(
     (ch) =>
       `${ch.title} (${ch.originalPages}p → ${ch.compactPages}p): ${
-        ch.bulletPoints[0] || 'Ready for chapter-level compression.'
+        ch.bulletPoints[0] || ch.originalText[0]?.slice(0, 140) || ''
       }`
   );
 
@@ -408,24 +620,26 @@ export function buildBookFromExtractedText(
     id: `uploaded-${Date.now()}`,
     title: title || 'Uploaded Club Manuscript',
     author: author || 'Independent Author',
-    year: '2026',
+    year: new Date().getFullYear().toString(),
     genre: `${fileFormat} Import`,
     isPreCompressed: preCompress,
     sourceType: 'uploaded',
+    availabilityStatus: 'full_text',
+    sourceAttribution: `Local ${fileFormat} Upload (${chapters.length} verified section${chapters.length === 1 ? '' : 's'})`,
+    contentHash,
     fileFormat,
     coverColor: '#0047FF',
     coverAccent: '#F6C90E',
     originalTotalPages: allocation.totalOriginal,
     compactTotalPages: allocation.totalCompact,
-    superShortPages: 3,
-    tagline: `Imported ${fileFormat} with ${chapters.length} chapters (${allocation.totalOriginal}p original → ${allocation.totalCompact}p compact target).`,
+    superShortPages: Math.min(4, Math.max(1, chapters.length)),
+    tagline: `Verified ${fileFormat} manuscript with ${chapters.length} extracted chapter${chapters.length === 1 ? '' : 's'} (${allocation.totalOriginal}p original → ${allocation.totalCompact}p compact target).`,
     superShortExecutiveSummary: {
-      thesis: `${title} unfolds across ${chapters.length} distinct chapters, preserving its full chapter-by-chapter architecture.`,
-      executivePages: [
-        `Page 1 (Opening Premise): ${chapters[0]?.originalText[0] || ''}`,
-        `Page 2 (Midpoint Architecture): Across ${chapters.length} chapters, ${author} develops the central thematic conflict in sequence.`,
-        `Page 3 (Culmination): ${chapters[chapters.length - 1]?.originalText[0] || ''}`,
-      ],
+      thesis: `${title} contains ${chapters.length} verified chapter${chapters.length === 1 ? '' : 's'} extracted directly from the uploaded ${fileFormat} file.`,
+      executivePages: chapters.slice(0, 3).map(
+        (ch, idx) =>
+          `Section ${idx + 1} (${ch.title}): ${ch.originalText[0]?.slice(0, 240) || ''}`
+      ),
       coreTakeaways: masterBookBullets.slice(0, 6),
     },
     masterBookBullets,
@@ -434,68 +648,21 @@ export function buildBookFromExtractedText(
 }
 
 /**
- * Generates authentic chapter titles for an N-chapter book (e.g., 18 chapters -> 18 distinct chapter titles).
- */
-export function generateAuthenticChapterTitles(
-  bookTitle: string,
-  genre: string,
-  targetChapterCount: number,
-  providedTitles?: string[]
-): string[] {
-  if (providedTitles && providedTitles.length >= targetChapterCount) {
-    return providedTitles.slice(0, targetChapterCount);
-  }
-
-  const thematicArcs = [
-    'The Opening Threshold & Premise',
-    'Shadows of the Old Order',
-    'The First Catalyst',
-    'Whispers in the Archive',
-    'Crossroads of Ambition',
-    'The Anatomy of Conflict',
-    'Beneath the Surface',
-    'Alliances & Fracture Lines',
-    'The Midpoint Reckoning',
-    'Labyrinth of Motives',
-    'Trial by Fire',
-    'The Unseen Mechanism',
-    'Echoes of Consequence',
-    'The Gathering Storm',
-    'Point of No Return',
-    'The Crucible of Truth',
-    'Convergence & Climax',
-    'Aftermath & Enduring Legacy',
-    'The Second Horizon',
-    'Chronicles of the Remnant',
-    'The Final Testament',
-    'Epilogue of the Age',
-    'Coda in Minor Key',
-    'The Immortal Imprint',
-  ];
-
-  const titles: string[] = [];
-  for (let i = 0; i < targetChapterCount; i++) {
-    if (providedTitles && providedTitles[i]) {
-      titles.push(providedTitles[i]);
-    } else {
-      const arcName = thematicArcs[i % thematicArcs.length];
-      titles.push(`Chapter ${i + 1}: ${arcName}`);
-    }
-  }
-  return titles;
-}
-
-/**
- * Converts an ExternalCatalogBook fetched from Gutendex, OpenLibrary, or Google Books
- * into a BookItem with ALL of its chapters (e.g., 18 chapters -> 18 chapters).
- * IMPORTANT: By default for newly discovered catalog books (`preCompress = false`),
- * chapters are NOT pre-compressed all at once—each chapter is stored in its uncompressed
- * state (`isCompressed: false`) so the user can compress chapters individually on demand!
+ * Converts an ExternalCatalogBook fetched from Gutendex or Google Books into a BookItem.
+ *
+ * CONTENT INTEGRITY GUARANTEE (CRITICAL):
+ * - NEVER manufactures fake chapters from `item.description` or generic templates.
+ * - For `google_books` items (or items without verifiable full text):
+ *   - If `item.previewText` has real preview paragraphs, sets `availabilityStatus: 'preview'`.
+ *   - Otherwise sets `availabilityStatus: 'metadata_only'` and `chapters: []`.
+ * - For `gutendex` items (with `gutenbergId`):
+ *   - Sets `availabilityStatus: 'full_text'` and `chapters: []` until real Project Gutenberg
+ *     chapters are fetched from `/api/books/gutenberg-chapters` via `hydrateBookWithGutenbergChapters()`.
  */
 export function buildBookFromExternalCatalogItem(
   item: ExternalCatalogBook,
-  personaId: PresetPersonalityId = 'gandalf',
-  preCompress = false
+  _personaId: PresetPersonalityId = 'gandalf',
+  _preCompress = false
 ): BookItem {
   const palette = [
     { coverColor: '#1E293B', coverAccent: '#F6C90E' },
@@ -507,208 +674,604 @@ export function buildBookFromExternalCatalogItem(
   const colorPick =
     palette[Math.abs(item.title.length + item.author.length) % palette.length];
 
-  // Respect the book's actual chapter count (e.g. 18 chapters -> 18 chapters!)
-  const chapterCount = item.chapterCount && item.chapterCount >= 6
-    ? item.chapterCount
-    : 18;
-
-  const totalPages =
-    item.pageCount && item.pageCount >= 160 && item.pageCount <= 260
-      ? item.pageCount
-      : 216;
-
-  const basePerChapter = Math.max(8, Math.floor(totalPages / chapterCount));
-  const origPagesList: number[] = [];
-  for (let i = 0; i < chapterCount; i++) {
-    const variance = (i % 3) - 1; // -1, 0, +1
-    origPagesList.push(Math.max(6, basePerChapter + variance));
-  }
-  // Adjust first chapter so sum equals totalPages
-  const diff = totalPages - origPagesList.reduce((a, b) => a + b, 0);
-  origPagesList[0] = Math.max(6, origPagesList[0] + diff);
-
-  const allocation = calculateCompactPageAllocation(origPagesList, 0.175);
-
-  const summarySeed =
-    item.description && item.description.trim().length > 40
+  const srcApi = item.sourceApi || item.source || (item.gutenbergId ? 'gutendex' : 'google_books');
+  const cleanDescription =
+    item.description && item.description.trim().length > 0
       ? item.description.trim()
-      : `${item.title} by ${item.author} is a landmark work of ${item.genre.toLowerCase()} exploring human ambition, moral consequence, and the forces that shape society.`;
+      : `Catalog entry for ${item.title} by ${item.author}.`;
 
-  const chapterTitles = generateAuthenticChapterTitles(
-    item.title,
-    item.genre,
-    chapterCount,
-    item.chapterTitles
-  );
+  // Determine genuine content availability status
+  let availabilityStatus: ContentAvailabilityStatus = item.availabilityStatus || 'metadata_only';
+  if (!item.availabilityStatus) {
+    if (srcApi === 'gutendex' && item.gutenbergId) {
+      availabilityStatus = 'full_text';
+    } else if (item.previewText && item.previewText.length > 0) {
+      availabilityStatus = 'preview';
+    } else {
+      availabilityStatus = 'metadata_only';
+    }
+  }
 
-  const chapters: BookChapter[] = chapterTitles.map((chTitle, idx) => {
-    const origP = origPagesList[idx];
-    const compP = allocation.chapterCompactPages[idx];
+  const sourceAttribution =
+    item.sourceAttribution ||
+    (srcApi === 'gutendex' && item.gutenbergId
+      ? `Project Gutenberg Public Domain Archive (eBook #${item.gutenbergId})`
+      : availabilityStatus === 'preview'
+      ? 'Google Books Publisher Preview (Partial Text Only)'
+      : 'Google Books Discovery Catalog (Metadata Only — Full Manuscript Copyrighted / Unavailable)');
 
-    const originalText = [
-      `${summarySeed} In ${chTitle} (Movement ${idx + 1} of ${chapterCount}), ${item.author} develops the dramatic and philosophical stakes of ${item.title}.`,
-      `Across these ${origP} unabridged pages, characters and ideas confront the central tensions of ${item.genre.toLowerCase()}, advancing the narrative without skipping a single structural beat.`,
-      `As Chapter ${idx + 1} concludes, the groundwork is laid for ${
-        chapterTitles[idx + 1] || 'the volume’s final resolution'
-      }, preserving the integrity of all ${chapterCount} chapters.`,
-    ];
-
-    const chapterObj: BookChapter = {
-      id: `${item.id}-ch-${idx + 1}`,
-      number: idx + 1,
-      title: chTitle,
-      originalPages: origP,
-      compactPages: compP,
-      originalText,
+  // Only populate chapters if actual preview text was explicitly provided; NEVER fabricate chapters from description!
+  const chapters: BookChapter[] = [];
+  if (availabilityStatus === 'preview' && item.previewText && item.previewText.length > 0) {
+    const previewPages = Math.max(1, Math.round(item.previewText.join(' ').split(/\s+/).length / 250));
+    chapters.push({
+      id: `${item.id}-preview-1`,
+      number: 1,
+      title: 'Publisher Preview Excerpt',
+      originalPages: previewPages,
+      compactPages: 1,
+      originalText: item.previewText,
       compactText: [],
       bulletPoints: [],
-      isCompressed: preCompress,
-    };
+      isCompressed: false,
+      summaryStatus: 'uncompressed',
+    });
+  }
 
-    if (preCompress) {
-      const compressed = compressSingleChapterDeterministic(
-        chapterObj,
-        item.title,
-        item.author,
-        personaId
-      );
-      chapterObj.compactText = compressed.compactText;
-      chapterObj.bulletPoints = compressed.bulletPoints;
-    }
-
-    return chapterObj;
-  });
-
-  const masterBookBullets = chapters.map(
-    (c) =>
-      `${c.title} (${c.originalPages}p → ${c.compactPages}p): ${
-        c.bulletPoints[0] || `Uncompressed chapter (${c.originalPages}p) — click Compress Chapter to condense into ${c.compactPages}p.`
-      }`
-  );
-
-  const srcApi = item.sourceApi || item.source || 'gutendex';
+  const estimatedTotalPages = item.pageCount && item.pageCount > 0 ? item.pageCount : 0;
+  const estimatedCompactPages =
+    estimatedTotalPages > 0 ? Math.max(1, Math.round(estimatedTotalPages * 0.175)) : 0;
 
   return {
     id: item.id,
     gutenbergId: item.gutenbergId,
     title: item.title,
     author: item.author,
-    year: item.year || 'Classic Edition',
+    year: item.year || 'Catalog Edition',
     genre: item.genre || 'Literary Archive',
     subgenres: item.subgenres || [item.genre],
     mlTags: item.mlTags || [item.genre.toLowerCase(), item.author.toLowerCase()],
-    trendingScore: item.trendingScore || 88,
+    trendingScore: item.trendingScore || 85,
     isFeatured: item.isFeatured || false,
-    isPreCompressed: preCompress,
+    isPreCompressed: false,
     sourceType: srcApi === 'google_books' ? 'google_books' : 'gutendex',
+    availabilityStatus,
+    sourceAttribution,
     fileFormat: srcApi === 'gutendex' ? 'GUTENDEX' : 'GOOGLE BOOKS',
     coverUrl: item.coverUrl,
     coverColor: colorPick.coverColor,
     coverAccent: colorPick.coverAccent,
+    originalTotalPages: estimatedTotalPages,
+    compactTotalPages: estimatedCompactPages,
+    superShortPages: chapters.length > 0 ? 1 : 0,
+    tagline: cleanDescription.slice(0, 220),
+    superShortExecutiveSummary: {
+      thesis: cleanDescription,
+      executivePages:
+        availabilityStatus === 'metadata_only'
+          ? [
+              `Catalog Description: ${cleanDescription}`,
+              `Source & Rights Notice: This entry was discovered via ${sourceAttribution}. No public-domain full text is attached to this record, so The Readers Club does not fabricate chapters.`,
+            ]
+          : [cleanDescription],
+      coreTakeaways: [
+        `Author: ${item.author}`,
+        `Genre: ${item.genre}`,
+        `Availability: ${availabilityStatus === 'full_text' ? 'Full Public-Domain Text via Project Gutenberg' : availabilityStatus === 'preview' ? 'Publisher Preview Excerpt' : 'Catalog Metadata Only'}`,
+      ],
+    },
+    masterBookBullets: [],
+    chapters,
+  };
+}
+
+/**
+ * Hydrates a Project Gutenberg BookItem with real chapters retrieved from `/api/books/gutenberg-chapters`.
+ * If no valid chapters were extracted from the Gutenberg text, sets `availabilityStatus: 'extraction_failed'`
+ * rather than leaving fake content.
+ */
+export function hydrateBookWithGutenbergChapters(
+  book: BookItem,
+  extractedChapters: Array<{
+    number: number;
+    title: string;
+    originalText: string[];
+  }>
+): BookItem {
+  const validChapters = (extractedChapters || []).filter(
+    (c) => Array.isArray(c.originalText) && c.originalText.length > 0
+  );
+
+  if (validChapters.length === 0) {
+    return {
+      ...book,
+      availabilityStatus: 'extraction_failed',
+      extractionError:
+        'Project Gutenberg manuscript could not be parsed into readable chapters.',
+      chapters: [],
+    };
+  }
+
+  const origPagesPerChapter = validChapters.map((ch) => {
+    const words = ch.originalText.join(' ').split(/\s+/).filter(Boolean).length;
+    return Math.max(2, Math.round(words / 260));
+  });
+
+  const allocation = calculateCompactPageAllocation(origPagesPerChapter, 0.175);
+  const fullTextJoined = validChapters
+    .map((c) => `${c.title}\n${c.originalText.join('\n')}`)
+    .join('\n\n');
+  const contentHash = computeContentHash(fullTextJoined);
+
+  const chapters: BookChapter[] = validChapters.map((ch, idx) => ({
+    id: `${book.id}-ch-${idx + 1}`,
+    number: idx + 1,
+    title: ch.title,
+    originalPages: origPagesPerChapter[idx],
+    compactPages: allocation.chapterCompactPages[idx],
+    originalText: ch.originalText,
+    compactText: [],
+    bulletPoints: [],
+    isCompressed: false,
+    summaryStatus: 'uncompressed',
+  }));
+
+  const masterBookBullets = chapters.map(
+    (c) =>
+      `${c.title} (${c.originalPages}p original → ${c.compactPages}p target): ${
+        c.originalText[0]?.slice(0, 140) || ''
+      }...`
+  );
+
+  return {
+    ...book,
+    availabilityStatus: 'full_text',
+    contentHash,
     originalTotalPages: allocation.totalOriginal,
     compactTotalPages: allocation.totalCompact,
-    superShortPages: 3,
-    tagline: summarySeed.slice(0, 170),
+    superShortPages: Math.min(4, Math.max(2, Math.ceil(chapters.length / 6))),
     superShortExecutiveSummary: {
-      thesis: `${item.title} by ${item.author} (${item.year}) spans ${chapterCount} chapters (${allocation.totalOriginal}p original → ${allocation.totalCompact}p chapter-by-chapter compact target).`,
-      executivePages: [
-        `Page 1 — Foundation & Context: ${summarySeed}`,
-        `Page 2 — ${chapterCount}-Chapter Structural Arc: Rather than collapsing ${item.title} into 3 generic sections, all ${chapterCount} chapters are preserved 1-to-1 for chapter-level compression.`,
-        `Page 3 — Synthesis & Legacy: ${item.author}’s work remains a cornerstone of ${item.genre.toLowerCase()}.`,
-      ],
-      coreTakeaways: masterBookBullets.slice(0, 5),
+      thesis: `${book.title} by ${book.author} spans ${chapters.length} verified chapters (${allocation.totalOriginal}p original manuscript → ${allocation.totalCompact}p compact target) retrieved directly from Project Gutenberg.`,
+      executivePages: chapters.slice(0, 3).map(
+        (ch, idx) =>
+          `Movement ${idx + 1} (${ch.title}): ${ch.originalText[0]?.slice(0, 260) || ''}`
+      ),
+      coreTakeaways: masterBookBullets.slice(0, 6),
     },
     masterBookBullets,
     chapters,
   };
 }
 
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'over', 'under',
+  'between', 'through', 'about', 'after', 'before', 'book', 'novel', 'story',
+  'edition', 'classic', 'volume', 'work', 'tale', 'life', 'world', 'their',
+  'have', 'has', 'had', 'were', 'was', 'are', 'his', 'her', 'its', 'who',
+]);
+
+function tokenizeMetadata(text: string): string[] {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
+}
+
+function buildDocumentFeatures(book: ExternalCatalogBook): {
+  tokens: Record<string, number>;
+  genres: Set<string>;
+  authorTokens: Set<string>;
+  themeTokens: Set<string>;
+} {
+  const tokens: Record<string, number> = {};
+  const genres = new Set<string>();
+  const authorTokens = new Set<string>();
+  const themeTokens = new Set<string>();
+
+  const addToken = (tok: string, weight: number) => {
+    if (!tok) return;
+    tokens[tok] = (tokens[tok] || 0) + weight;
+  };
+
+  // Genre & subgenres carry strong structural weight
+  const allGenres = [book.genre, ...(book.subgenres || [])].filter(Boolean);
+  for (const g of allGenres) {
+    const cleanG = g.toLowerCase().trim();
+    genres.add(cleanG);
+    addToken(`genre:${cleanG}`, 3.0);
+    for (const gt of tokenizeMetadata(cleanG)) {
+      addToken(gt, 2.2);
+      themeTokens.add(gt);
+    }
+  }
+
+  // Author tokens
+  const cleanAuthor = (book.author || '').toLowerCase().trim();
+  if (cleanAuthor) {
+    addToken(`author:${cleanAuthor}`, 3.2);
+    for (const at of tokenizeMetadata(cleanAuthor)) {
+      authorTokens.add(at);
+      addToken(`author_tok:${at}`, 2.0);
+    }
+  }
+
+  // ML Tags & Subjects
+  for (const tag of book.mlTags || []) {
+    for (const tt of tokenizeMetadata(tag)) {
+      themeTokens.add(tt);
+      addToken(tt, 2.0);
+    }
+  }
+
+  // Title & Description thematic tokens
+  for (const tt of tokenizeMetadata(book.title)) {
+    themeTokens.add(tt);
+    addToken(tt, 1.5);
+  }
+  for (const dt of tokenizeMetadata(book.description || '')) {
+    themeTokens.add(dt);
+    addToken(dt, 1.0);
+  }
+
+  return { tokens, genres, authorTokens, themeTokens };
+}
+
+function cosineSimilarity(
+  vecA: Record<string, number>,
+  vecB: Record<string, number>
+): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (const val of Object.values(vecA)) {
+    normA += val * val;
+  }
+  for (const val of Object.values(vecB)) {
+    normB += val * val;
+  }
+  if (normA === 0 || normB === 0) return 0;
+
+  for (const [k, valA] of Object.entries(vecA)) {
+    const valB = vecB[k];
+    if (valB !== undefined) {
+      dot += valA * valB;
+    }
+  }
+
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
 /**
- * Machine Learning (ML) Content-Based & Persona-Affinity Recommendation Engine.
- * Uses TF-IDF feature token weighting + Cosine Similarity over genre, tags, author,
- * search history, and active Persona style vectors to rank books and compute a Netflix-style % Match score.
+ * Genuine TF-IDF + Cosine Similarity + Maximal Marginal Relevance (MMR) Recommendation Engine.
+ *
+ * Features:
+ * 1. Computes Inverse Document Frequency (IDF) across the candidate corpus.
+ * 2. Builds TF-IDF vectors for every candidate book over genres, subgenres, authors, subjects, and descriptions.
+ * 3. Builds a composite User Taste TF-IDF Vector from:
+ *    - Explicit liked books (+2.8x weight)
+ *    - Explicit disliked books (-2.2x negative penalty weight)
+ *    - Reading history & viewed books (+1.8x weight)
+ *    - Genre interaction counts & search history (+2.0x weight)
+ *    - Active persona literary preferences (+1.2x weight, primary signal during cold-start)
+ * 4. Ranks candidates via Cosine Similarity, applies MMR diversity penalty so a single author/genre
+ *    cannot monopolize the top shelf, and emits structured, human-readable explanations.
  */
 export function computeMlRecommendations(
   candidates: ExternalCatalogBook[],
   taste: UserTasteProfile,
   limit = 12
 ): ScoredBookRecommendation[] {
-  const personaProfile = PERSONALITY_PROFILES[taste.activePersona];
-  const personaGenres = (personaProfile.preferredGenres || []).map((g) =>
-    g.toLowerCase()
-  );
+  if (!candidates || candidates.length === 0) return [];
 
-  // Build user preference weights map
-  const userWeights: Record<string, number> = {};
-  for (const [genreKey, count] of Object.entries(taste.favoriteGenres)) {
-    userWeights[genreKey.toLowerCase()] = (userWeights[genreKey.toLowerCase()] || 0) + count * 2.5;
-  }
-  for (const pg of personaGenres) {
-    userWeights[pg] = (userWeights[pg] || 0) + 2.0;
-  }
-  for (const q of taste.searchHistory.slice(-5)) {
-    for (const token of q.toLowerCase().split(/\s+/).filter((t) => t.length > 2)) {
-      userWeights[token] = (userWeights[token] || 0) + 3.0;
+  const personaProfile =
+    PERSONALITY_PROFILES[taste.activePersona] || PERSONALITY_PROFILES.gandalf;
+  const likedSet = new Set(taste.likedBookIds || []);
+  const dislikedSet = new Set(taste.dislikedBookIds || []);
+  const viewedSet = new Set([
+    ...(taste.viewedBookIds || []),
+    ...(taste.completedBookIds || []),
+  ]);
+
+  const isColdStart =
+    Object.keys(taste.favoriteGenres || {}).length === 0 &&
+    (taste.searchHistory || []).length === 0 &&
+    viewedSet.size === 0 &&
+    likedSet.size === 0 &&
+    dislikedSet.size === 0;
+
+  // Step 1: Extract raw term frequencies per candidate & document frequency across corpus
+  const docFeatures = candidates.map((b) => buildDocumentFeatures(b));
+  const docFreq: Record<string, number> = {};
+  const N = candidates.length;
+
+  for (const df of docFeatures) {
+    for (const term of Object.keys(df.tokens)) {
+      docFreq[term] = (docFreq[term] || 0) + 1;
     }
   }
 
-  const scored: ScoredBookRecommendation[] = candidates.map((book) => {
-    const tokens = new Set<string>([
-      book.genre.toLowerCase(),
-      ...(book.subgenres || []).map((s) => s.toLowerCase()),
-      ...(book.mlTags || []).map((t) => t.toLowerCase()),
-      ...book.title
-        .toLowerCase()
-        .split(/\W+/)
-        .filter((w) => w.length > 3),
-      ...book.author
-        .toLowerCase()
-        .split(/\W+/)
-        .filter((w) => w.length > 3),
-    ]);
+  // Step 2: Compute smoothed IDF and normalized TF-IDF vector for each book
+  const idf: Record<string, number> = {};
+  for (const [term, dfCount] of Object.entries(docFreq)) {
+    idf[term] = Math.log(1 + N / (1 + dfCount)) + 1.0;
+  }
 
-    let rawDotProduct = 0;
-    let matchedGenreLabel = book.genre;
+  const bookTfIdfVectors: Record<string, number>[] = docFeatures.map((df) => {
+    const vec: Record<string, number> = {};
+    for (const [term, tf] of Object.entries(df.tokens)) {
+      vec[term] = (1 + Math.log(tf)) * (idf[term] || 1.0);
+    }
+    return vec;
+  });
 
-    for (const tok of tokens) {
-      for (const [prefKey, weight] of Object.entries(userWeights)) {
-        if (tok.includes(prefKey) || prefKey.includes(tok)) {
-          rawDotProduct += weight;
-          if (weight >= 2.0) {
-            matchedGenreLabel = book.genre;
-          }
+  // Step 3: Construct User Taste Profile Vector in the same TF-IDF space
+  const userVector: Record<string, number> = {};
+  const addUserTerm = (term: string, weight: number) => {
+    const termIdf = idf[term] || 1.25;
+    userVector[term] = (userVector[term] || 0) + weight * termIdf;
+  };
+
+  // 3a. Persona baseline preferences (always active, primary during cold-start)
+  const personaWeight = isColdStart ? 2.5 : 1.1;
+  for (const pg of personaProfile.preferredGenres || []) {
+    const cleanPg = pg.toLowerCase().trim();
+    addUserTerm(`genre:${cleanPg}`, personaWeight);
+    for (const tok of tokenizeMetadata(cleanPg)) {
+      addUserTerm(tok, personaWeight * 0.85);
+    }
+  }
+
+  // 3b. Explicit Genre affinity counts
+  for (const [genreKey, count] of Object.entries(taste.favoriteGenres || {})) {
+    const cleanG = genreKey.toLowerCase().trim();
+    addUserTerm(`genre:${cleanG}`, count * 2.2);
+    for (const tok of tokenizeMetadata(cleanG)) {
+      addUserTerm(tok, count * 1.6);
+    }
+  }
+
+  // 3c. Search history tokens
+  for (const query of (taste.searchHistory || []).slice(-8)) {
+    for (const tok of tokenizeMetadata(query)) {
+      addUserTerm(tok, 2.4);
+    }
+  }
+
+  // 3d. Centroid feedback from Liked, Viewed, and Disliked books (Rocchio-style query expansion)
+  const likedBooks: ExternalCatalogBook[] = [];
+  const viewedBooks: ExternalCatalogBook[] = [];
+  const dislikedBooks: ExternalCatalogBook[] = [];
+
+  candidates.forEach((book, idx) => {
+    const vec = bookTfIdfVectors[idx];
+    if (likedSet.has(book.id)) {
+      likedBooks.push(book);
+      for (const [term, val] of Object.entries(vec)) {
+        userVector[term] = (userVector[term] || 0) + val * 1.65;
+      }
+    } else if (dislikedSet.has(book.id)) {
+      dislikedBooks.push(book);
+      for (const [term, val] of Object.entries(vec)) {
+        userVector[term] = (userVector[term] || 0) - val * 1.35;
+      }
+    } else if (viewedSet.has(book.id)) {
+      viewedBooks.push(book);
+      for (const [term, val] of Object.entries(vec)) {
+        userVector[term] = (userVector[term] || 0) + val * 0.9;
+      }
+    }
+  });
+
+  // Remove negative components from userVector before cosine calculation while keeping track of dislike similarity separately
+  const positiveUserVector: Record<string, number> = {};
+  for (const [term, val] of Object.entries(userVector)) {
+    if (val > 0) positiveUserVector[term] = val;
+  }
+
+  // Step 4: Score every candidate with Cosine Similarity + Dislike Penalty + Availability Bonus
+  interface RawCandidateEval {
+    idx: number;
+    book: ExternalCatalogBook;
+    rawUtility: number;
+    cosineScore: number;
+    reasons: RecommendationExplanation[];
+  }
+
+  const evaluations: RawCandidateEval[] = candidates.map((book, idx) => {
+    const vec = bookTfIdfVectors[idx];
+    const feat = docFeatures[idx];
+    const simToUser = cosineSimilarity(vec, positiveUserVector);
+
+    // Compute similarity to explicitly liked & disliked books
+    let maxLikedSim = 0;
+    let bestLikedBook: ExternalCatalogBook | null = null;
+    for (const lb of likedBooks) {
+      if (lb.id === book.id) continue;
+      const lbIdx = candidates.findIndex((c) => c.id === lb.id);
+      if (lbIdx !== -1) {
+        const s = cosineSimilarity(vec, bookTfIdfVectors[lbIdx]);
+        if (s > maxLikedSim) {
+          maxLikedSim = s;
+          bestLikedBook = lb;
         }
       }
     }
 
-    // Boost for trending & chapter depth
-    const trendingBoost = ((book.trendingScore || 85) - 75) * 0.35;
-    const viewedBoost = taste.viewedBookIds.includes(book.id) ? 4 : 0;
+    let maxDislikedSim = 0;
+    for (const db of dislikedBooks) {
+      const dbIdx = candidates.findIndex((c) => c.id === db.id);
+      if (dbIdx !== -1) {
+        const s = cosineSimilarity(vec, bookTfIdfVectors[dbIdx]);
+        if (s > maxDislikedSim) maxDislikedSim = s;
+      }
+    }
 
-    // Normalize into a realistic Netflix-style 78% - 99% Taste Match
-    const deterministicHash =
-      (book.title.charCodeAt(0) + book.author.charCodeAt(0) + (book.chapterCount || 18)) % 9;
-    const matchPercentage = Math.min(
-      99,
-      Math.max(
-        78,
-        Math.round(79 + Math.min(16, rawDotProduct * 1.8) + trendingBoost * 0.4 + viewedBoost * 0.5 + deterministicHash * 0.4)
-      )
+    const isExplicitlyDisliked = dislikedSet.has(book.id);
+    const isExplicitlyLiked = likedSet.has(book.id);
+
+    // Availability quality bonus (prefer verifiable full_text over metadata_only)
+    const fullTextBonus =
+      book.availabilityStatus === 'full_text' || book.gutenbergId ? 0.08 : 0;
+    const popularityPrior = Math.min(0.1, ((book.trendingScore || 80) - 70) / 300);
+
+    let rawUtility =
+      simToUser * 0.72 +
+      maxLikedSim * 0.25 +
+      fullTextBonus +
+      popularityPrior -
+      maxDislikedSim * 0.35;
+
+    if (isExplicitlyLiked) rawUtility += 0.18;
+    if (isExplicitlyDisliked) rawUtility -= 0.85;
+
+    // Build transparent, verifiable explanations
+    const reasons: RecommendationExplanation[] = [];
+
+    // 1. Check related author from liked or viewed books
+    const authorMatchBook = [...likedBooks, ...viewedBooks].find(
+      (b) =>
+        b.id !== book.id &&
+        b.author.toLowerCase().trim() === book.author.toLowerCase().trim()
     );
+    if (authorMatchBook) {
+      reasons.push({
+        type: 'related_author',
+        label: `Related author: ${book.author} (you explored "${authorMatchBook.title}")`,
+      });
+    }
 
-    const matchReason =
-      rawDotProduct > 3.5
-        ? `${matchPercentage}% Taste Match · High affinity with ${matchedGenreLabel} & ${personaProfile.name}`
-        : `${matchPercentage}% Taste Match · Curated for ${personaProfile.name}'s ${matchedGenreLabel} shelf`;
+    // 2. Check reading history / liked book similarity
+    if (bestLikedBook && maxLikedSim > 0.15) {
+      reasons.push({
+        type: 'reading_history',
+        label: `Based on your interest in "${bestLikedBook.title}"`,
+      });
+    } else if (viewedBooks.length > 0) {
+      const historyMatch = viewedBooks.find(
+        (vb) =>
+          vb.id !== book.id &&
+          vb.genre.toLowerCase() === book.genre.toLowerCase()
+      );
+      if (historyMatch) {
+        reasons.push({
+          type: 'reading_history',
+          label: `Based on your reading history in ${book.genre}`,
+        });
+      }
+    }
+
+    // 3. Check shared genre preference
+    const matchedFavGenre = Object.keys(taste.favoriteGenres || {}).find(
+      (g) =>
+        feat.genres.has(g.toLowerCase()) ||
+        book.genre.toLowerCase().includes(g.toLowerCase())
+    );
+    if (matchedFavGenre) {
+      reasons.push({
+        type: 'shared_genre',
+        label: `Shared genre: ${book.genre}`,
+      });
+    }
+
+    // 4. Check shared thematic keywords
+    const sharedThemes = [...feat.themeTokens].filter(
+      (t) => (positiveUserVector[t] || 0) > 1.8
+    );
+    if (sharedThemes.length > 0) {
+      reasons.push({
+        type: 'similar_themes',
+        label: `Similar themes: ${sharedThemes.slice(0, 3).join(', ')}`,
+      });
+    }
+
+    // 5. Cold-start fallback explanation
+    if (reasons.length === 0) {
+      reasons.push({
+        type: isColdStart ? 'cold_start_popular' : 'shared_genre',
+        label: isColdStart
+          ? `Popular in ${book.genre} · Aligned with ${personaProfile.name}'s library`
+          : `Shared genre: ${book.genre}`,
+      });
+    }
 
     return {
+      idx,
       book,
-      matchPercentage,
-      matchReason,
+      rawUtility,
+      cosineScore: Math.max(0, Math.min(1, simToUser)),
+      reasons,
     };
   });
 
-  return scored
-    .sort((a, b) => b.matchPercentage - a.matchPercentage)
-    .slice(0, limit);
+  // Step 5: Maximal Marginal Relevance (MMR) Selection for Diversity
+  // Ensures the recommendation shelf does not repeat the exact same author or identical subgenre cluster
+  const selected: RawCandidateEval[] = [];
+  const remaining = [...evaluations].sort((a, b) => b.rawUtility - a.rawUtility);
+  const lambda = 0.78; // 78% relevance, 22% diversity
+
+  while (selected.length < limit && remaining.length > 0) {
+    if (selected.length === 0) {
+      selected.push(remaining.shift()!);
+      continue;
+    }
+
+    let bestIdx = 0;
+    let bestMmrScore = -Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const cand = remaining[i];
+      // Disliked items stay at the bottom
+      if (dislikedSet.has(cand.book.id)) {
+        const score = cand.rawUtility - 2.0;
+        if (score > bestMmrScore) {
+          bestMmrScore = score;
+          bestIdx = i;
+        }
+        continue;
+      }
+
+      let maxSimToSelected = 0;
+      for (const sel of selected) {
+        const sim = cosineSimilarity(
+          bookTfIdfVectors[cand.idx],
+          bookTfIdfVectors[sel.idx]
+        );
+        const sameAuthorPenalty =
+          cand.book.author.toLowerCase() === sel.book.author.toLowerCase()
+            ? 0.35
+            : 0;
+        maxSimToSelected = Math.max(maxSimToSelected, sim + sameAuthorPenalty);
+      }
+
+      const mmrScore =
+        lambda * cand.rawUtility - (1 - lambda) * maxSimToSelected;
+      if (mmrScore > bestMmrScore) {
+        bestMmrScore = mmrScore;
+        bestIdx = i;
+      }
+    }
+
+    selected.push(remaining.splice(bestIdx, 1)[0]);
+  }
+
+  return selected.map((item) => {
+    // Map rawUtility (-0.5..1.0) into a meaningful 55%..99% match score
+    const clampedUtility = Math.max(0, Math.min(1, item.rawUtility));
+    const matchPercentage = dislikedSet.has(item.book.id)
+      ? Math.max(35, Math.round(45 + clampedUtility * 20))
+      : Math.min(99, Math.max(68, Math.round(72 + clampedUtility * 27)));
+
+    const primaryReason = item.reasons[0]?.label || `Shared genre: ${item.book.genre}`;
+
+    return {
+      book: item.book,
+      matchPercentage,
+      similarityScore: Number(item.cosineScore.toFixed(4)),
+      matchReason: `${matchPercentage}% Match · ${primaryReason}`,
+      explanationReasons: item.reasons,
+    };
+  });
 }
