@@ -1133,7 +1133,12 @@ Rules:
   return app;
 }
 
+let serverStarted = false;
+
 export async function startServer() {
+  if (serverStarted) return;
+  serverStarted = true;
+
   const app = createApp();
   const PORT = 3000;
 
