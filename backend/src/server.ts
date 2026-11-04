@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -479,11 +478,18 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
   return extractedChapters;
 }
 
-async function startServer() {
+export function createApp() {
   const app = express();
-  const PORT = 3000;
 
   app.use(express.json({ limit: '15mb' }));
+
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'the-readers-club',
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // 1. Per-Chapter On-Demand AI Summarization Pipeline (with Chunking, Caching, Validation & Retries)
   app.post('/api/summarize', async (req, res) => {
@@ -1124,10 +1130,18 @@ Rules:
     }
   });
 
+  return app;
+}
+
+export async function startServer() {
+  const app = createApp();
+  const PORT = 3000;
+
   const frontendDir = path.resolve(__dirname, '../../frontend');
   const distPath = path.resolve(__dirname, '../../dist');
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       root: frontendDir,
       configFile: path.resolve(frontendDir, 'vite.config.ts'),
@@ -1148,17 +1162,33 @@ Rules:
   }
 
   const listenPort = Number(process.env.PORT) || PORT;
-  app.listen(listenPort, '0.0.0.0', () => {
-    console.log(
-      `The Readers Club server listening on http://0.0.0.0:${listenPort}`
-    );
+  return new Promise<void>((resolve) => {
+    app.listen(listenPort, '0.0.0.0', () => {
+      console.log(
+        `The Readers Club server listening on http://0.0.0.0:${listenPort}`
+      );
+      resolve();
+    });
   });
 }
 
-// Only start the Express listener when executed directly (not when imported by unit tests)
-const isDirectRun =
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(__filename);
-if (isDirectRun) {
-  startServer();
+// Start the Express listener when executed via root server.ts or backend/src/server.ts (not when imported by unit tests)
+const rootServerEntry = path.resolve(__dirname, '../../server.ts');
+const entryArg = process.argv[1] ? path.resolve(process.argv[1]) : '';
+const isDirectServerRun =
+  !process.env.NODE_TEST_CONTEXT &&
+  Boolean(
+    entryArg &&
+      (entryArg === path.resolve(__filename) ||
+        entryArg === rootServerEntry ||
+        entryArg.endsWith('/server.ts') ||
+        entryArg.endsWith('\\server.ts'))
+  );
+
+if (isDirectServerRun) {
+  startServer().catch((err) => {
+    console.error('Fatal server startup error:', err);
+    process.exit(1);
+  });
 }
+
