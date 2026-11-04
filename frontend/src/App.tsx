@@ -33,6 +33,7 @@ import {
   ReadersClubLogo,
 } from './components/TactileArt';
 import { ReaderWorkspace } from './components/ReaderModal';
+import { DotFooter } from './components/DotFooter';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
 import {
   FileUp,
@@ -1663,29 +1664,7 @@ Each scene builds on the previous chapter’s discoveries while raising new ques
         </main>
       )}
 
-      {/* SIMPLE, CLEAN FOOTER */}
-      <footer className="mt-12 bg-[#111] text-neutral-300 border-t-[3px] border-[#111] px-6 py-4">
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
-          <div className="flex items-center gap-2.5">
-            <ReadersClubLogo className="w-6 h-6" />
-            <span className="font-display-brutal text-[#F6C90E] tracking-tight">
-              THE READERS CLUB
-            </span>
-          </div>
-          <div className="flex items-center gap-4 font-bold">
-            {navItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => navigateToPage(item.id)}
-                className="hover:text-[#F6C90E] cursor-pointer"
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </footer>
+      <DotFooter appName="The Readers Club" navItems={navItems} onNavigate={navigateToPage} />
 
       <OfflineIndicator />
     </div>
