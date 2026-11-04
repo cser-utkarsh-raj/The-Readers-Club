@@ -13,6 +13,13 @@ export type PresetPersonalityId =
   | 'deadpool'
   | 'gandalf';
 
+export type AppPageRoute =
+  | 'home'
+  | 'catalog'
+  | 'reader'
+  | 'press'
+  | 'voices';
+
 export interface PersonalityProfile {
   id: PresetPersonalityId;
   name: string;
@@ -28,6 +35,7 @@ export interface PersonalityProfile {
   accentHex: string;
   sampleQuote: string;
   avatarUrl?: string;
+  preferredGenres?: string[];
 }
 
 export interface BookChapter {
@@ -39,16 +47,31 @@ export interface BookChapter {
   originalText: string[];
   compactText: string[];
   bulletPoints: string[];
+  /**
+   * True for pre-pressed Compact Catalog books or after the user compresses this chapter on demand.
+   * False for newly added / discovered books until compressed chapter-by-chapter.
+   */
+  isCompressed?: boolean;
   personaCompactCache?: Record<string, string[]>;
   personaBulletCache?: Record<string, string[]>;
 }
 
 export interface BookItem {
   id: string;
+  gutenbergId?: number;
   title: string;
   author: string;
   year: string;
   genre: string;
+  subgenres?: string[];
+  mlTags?: string[];
+  trendingScore?: number;
+  isFeatured?: boolean;
+  /**
+   * True only for the initial signature Pre-Pressed Compact Catalog.
+   * False for all newly discovered / catalog / uploaded books, which compress chapter-by-chapter on demand.
+   */
+  isPreCompressed?: boolean;
   sourceType: 'open_source' | 'uploaded' | 'gutendex' | 'google_books';
   fileFormat?: 'EPUB' | 'PDF' | 'TXT' | 'ARCHIVE' | 'GUTENDEX' | 'GOOGLE BOOKS';
   coverUrl?: string;
@@ -69,16 +92,37 @@ export interface BookItem {
 
 export interface ExternalCatalogBook {
   id: string;
+  gutenbergId?: number;
   title: string;
   author: string;
   year: string;
   genre: string;
-  source?: 'gutendex' | 'google_books';
-  sourceApi?: 'gutendex' | 'google_books';
+  subgenres?: string[];
+  mlTags?: string[];
+  trendingScore?: number;
+  isFeatured?: boolean;
+  chapterCount?: number;
+  chapterTitles?: string[];
+  source?: 'gutendex' | 'google_books' | 'open_library';
+  sourceApi?: 'gutendex' | 'google_books' | 'open_library';
   coverUrl: string;
   description: string;
   textUrl?: string;
   pageCount?: number;
+}
+
+export interface UserTasteProfile {
+  viewedBookIds: string[];
+  compressedBookIds: string[];
+  favoriteGenres: Record<string, number>;
+  activePersona: PresetPersonalityId;
+  searchHistory: string[];
+}
+
+export interface ScoredBookRecommendation {
+  book: ExternalCatalogBook | BookItem;
+  matchPercentage: number;
+  matchReason: string;
 }
 
 export interface ClubSettings {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  BookChapter,
   BookItem,
   BulletScope,
   ClubSettings,
@@ -9,6 +10,7 @@ import {
 import {
   PERSONALITY_PROFILES,
   applyPersonaVoiceToParagraphs,
+  compressSingleChapterDeterministic,
 } from '../utils/bookLogic';
 import { BookPosterCover, PersonaPortraitSvg } from './TactileArt';
 import {
@@ -26,6 +28,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Sliders,
+  ArrowLeft,
+  Cpu,
+  CheckCircle2,
+  Clock,
+  Layers,
 } from 'lucide-react';
 
 interface ReaderWorkspaceProps {
@@ -41,7 +48,12 @@ interface ReaderWorkspaceProps {
     compactText: string[],
     bulletPoints: string[]
   ) => void;
+  onHydrateGutenbergChapters?: (
+    bookId: string,
+    extracted: Array<{ number: number; title: string; originalText: string[] }>
+  ) => void;
   onOpenSettingsTab: () => void;
+  onBackToCatalog?: () => void;
 }
 
 export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
@@ -51,11 +63,14 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   settings,
   onUpdateSettings,
   onUpdateBookChapter,
+  onHydrateGutenbergChapters,
   onOpenSettingsTab,
+  onBackToCatalog,
 }) => {
   const [selectedChapterIdx, setSelectedChapterIdx] = useState(0);
   const [bulletScope, setBulletScope] = useState<BulletScope>('chapter');
   const [isAiRewriting, setIsAiRewriting] = useState(false);
+  const [isBatchCompressing, setIsBatchCompressing] = useState(false);
   const [aiStatusBanner, setAiStatusBanner] = useState<string | null>(null);
 
   // Audiobook Playback State
@@ -70,10 +85,32 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const speechSynthRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  // Reset chapter index when switching books
+  // Reset chapter index when switching books and fetch live Gutenberg chapters if applicable
   useEffect(() => {
     setSelectedChapterIdx(0);
     stopAudioPlayback();
+
+    if (book.gutenbergId && book.isPreCompressed === false && onHydrateGutenbergChapters) {
+      let cancelled = false;
+      fetch(`/api/books/gutenberg-chapters?gutenbergId=${book.gutenbergId}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (
+            !cancelled &&
+            data &&
+            Array.isArray(data.chapters) &&
+            data.chapters.length >= 6
+          ) {
+            onHydrateGutenbergChapters(book.id, data.chapters);
+          }
+        })
+        .catch(() => {
+          // Keep structured chapters
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
   }, [book.id]);
 
   // Stop audio when unmounting
@@ -99,23 +136,39 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       ? settings.customNarratorTrait.trim()
       : narratorProfile.name;
 
-  const personaCacheKey = settings.useCustomAuthor && settings.customAuthorTrait.trim()
-    ? `custom:${settings.customAuthorTrait.trim()}`
-    : settings.authorPersonality;
+  const personaCacheKey =
+    settings.useCustomAuthor && settings.customAuthorTrait.trim()
+      ? `custom:${settings.customAuthorTrait.trim()}`
+      : settings.authorPersonality;
+
+  function isChapterCompressed(ch: BookChapter): boolean {
+    if (book.isPreCompressed !== false) return true;
+    if (ch.isCompressed) return true;
+    if (ch.personaCompactCache?.[personaCacheKey]?.length) return true;
+    return ch.compactText && ch.compactText.length > 0;
+  }
+
+  const currentChapterIsCompressed = isChapterCompressed(currentChapter);
+
+  const compressedChaptersCount = book.chapters.filter((ch) =>
+    isChapterCompressed(ch)
+  ).length;
 
   // Determine the chapter's Compact paragraphs in the active Author Persona
-  const displayedCompactParagraphs =
-    currentChapter.personaCompactCache?.[personaCacheKey] ||
-    applyPersonaVoiceToParagraphs(
-      currentChapter.compactText,
-      settings.authorPersonality,
-      currentChapter.title,
-      settings.useCustomAuthor ? settings.customAuthorTrait : undefined
-    );
+  const displayedCompactParagraphs = currentChapterIsCompressed
+    ? currentChapter.personaCompactCache?.[personaCacheKey] ||
+      applyPersonaVoiceToParagraphs(
+        currentChapter.compactText,
+        settings.authorPersonality,
+        currentChapter.title,
+        settings.useCustomAuthor ? settings.customAuthorTrait : undefined
+      )
+    : [];
 
-  const displayedChapterBullets =
-    currentChapter.personaBulletCache?.[personaCacheKey] ||
-    currentChapter.bulletPoints;
+  const displayedChapterBullets = currentChapterIsCompressed
+    ? currentChapter.personaBulletCache?.[personaCacheKey] ||
+      currentChapter.bulletPoints
+    : [];
 
   function stopAudioPlayback() {
     if (audioElementRef.current) {
@@ -130,13 +183,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     setIsGeneratingTts(false);
   }
 
-  async function handleGenerateAiPersonaSummary() {
-    if (isAiRewriting) return;
-    setIsAiRewriting(true);
-    setAiStatusBanner(
-      `Composing ${activeAuthorDisplayName} commentary for ${currentChapter.title}...`
-    );
-
+  async function compressSpecificChapter(targetChapter: BookChapter) {
     const stylePrompt =
       settings.useCustomAuthor && settings.customAuthorTrait.trim()
         ? `Summarize with the personality of: ${settings.customAuthorTrait.trim()}. Keep all chapter facts and narrative flow intact.`
@@ -148,10 +195,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bookTitle: book.title,
-          chapterTitle: currentChapter.title,
-          originalText: currentChapter.originalText,
-          originalPages: currentChapter.originalPages,
-          targetCompactPages: currentChapter.compactPages,
+          chapterTitle: targetChapter.title,
+          chapterNumber: targetChapter.number,
+          totalChapters: book.chapters.length,
+          originalText: targetChapter.originalText,
+          originalPages: targetChapter.originalPages,
+          targetCompactPages: targetChapter.compactPages,
           authorPersonaName: activeAuthorDisplayName,
           authorStylePrompt: stylePrompt,
         }),
@@ -159,55 +208,79 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
       if (response.ok) {
         const data = await response.json();
-        if (
-          Array.isArray(data.compactText) &&
-          data.compactText.length > 0
-        ) {
+        if (Array.isArray(data.compactText) && data.compactText.length > 0) {
           onUpdateBookChapter(
             book.id,
-            currentChapter.id,
+            targetChapter.id,
             personaCacheKey,
             data.compactText,
             Array.isArray(data.bulletPoints) && data.bulletPoints.length > 0
               ? data.bulletPoints
-              : currentChapter.bulletPoints
+              : targetChapter.bulletPoints
           );
-          setAiStatusBanner(
-            `Fresh chapter edition composed by ${activeAuthorDisplayName}.`
-          );
-          setIsAiRewriting(false);
           return;
         }
       }
     } catch {
-      // Fallback handled cleanly below
+      // Deterministic per-chapter fallback below
     }
 
-    // Instant deterministic persona rewrite if offline or key not set
-    const rewrittenCompact = applyPersonaVoiceToParagraphs(
-      currentChapter.compactText,
+    const deterministic = compressSingleChapterDeterministic(
+      targetChapter,
+      book.title,
+      book.author,
       settings.authorPersonality,
-      currentChapter.title,
       settings.useCustomAuthor ? settings.customAuthorTrait : undefined
-    );
-    const rewrittenBullets = currentChapter.bulletPoints.map(
-      (b, idx) => `[${activeAuthorDisplayName} Note #${idx + 1}] ${b}`
     );
 
     onUpdateBookChapter(
       book.id,
-      currentChapter.id,
+      targetChapter.id,
       personaCacheKey,
-      rewrittenCompact,
-      rewrittenBullets
+      deterministic.compactText,
+      deterministic.bulletPoints
     );
+  }
+
+  async function handleCompressCurrentChapter() {
+    if (isAiRewriting) return;
+    setIsAiRewriting(true);
     setAiStatusBanner(
-      `${activeAuthorDisplayName} Edition applied to ${currentChapter.title}.`
+      `Compressing Chapter ${currentChapter.number} of ${book.chapters.length} (${currentChapter.originalPages}p → ${currentChapter.compactPages}p) in ${activeAuthorDisplayName}'s voice...`
+    );
+
+    await compressSpecificChapter(currentChapter);
+
+    setAiStatusBanner(
+      `Chapter ${currentChapter.number} compressed (${currentChapter.originalPages}p → ${currentChapter.compactPages}p) by ${activeAuthorDisplayName}.`
     );
     setIsAiRewriting(false);
   }
 
+  async function handleCompressAllChaptersSequentially() {
+    if (isBatchCompressing) return;
+    setIsBatchCompressing(true);
+
+    const uncompressedList = book.chapters.filter((ch) => !isChapterCompressed(ch));
+    for (let i = 0; i < uncompressedList.length; i++) {
+      const ch = uncompressedList[i];
+      setAiStatusBanner(
+        `Chapter-by-Chapter Press: Compressing Chapter ${ch.number} of ${book.chapters.length} (${ch.originalPages}p → ${ch.compactPages}p)...`
+      );
+      await compressSpecificChapter(ch);
+    }
+
+    setAiStatusBanner(
+      `All ${book.chapters.length} chapters compressed 1-to-1 into a ${book.compactTotalPages}-page Compact Edition!`
+    );
+    setIsBatchCompressing(false);
+  }
+
   async function handleToggleAudiobookPlayback(startIdx?: number) {
+    if (!currentChapterIsCompressed) {
+      await handleCompressCurrentChapter();
+    }
+
     const targetIdx =
       typeof startIdx === 'number' ? startIdx : activeAudioParagraphIdx;
 
@@ -221,10 +294,17 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     setActiveAudioParagraphIdx(targetIdx);
     setIsGeneratingTts(true);
 
-    const textToRead =
-      displayedCompactParagraphs[targetIdx] ||
-      displayedCompactParagraphs[0] ||
-      '';
+    const paragraphs =
+      displayedCompactParagraphs.length > 0
+        ? displayedCompactParagraphs
+        : compressSingleChapterDeterministic(
+            currentChapter,
+            book.title,
+            book.author,
+            settings.authorPersonality
+          ).compactText;
+
+    const textToRead = paragraphs[targetIdx] || paragraphs[0] || '';
 
     const narratorPrompt =
       settings.useCustomNarrator && settings.customNarratorTrait.trim()
@@ -257,7 +337,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           );
 
           audio.onended = () => {
-            if (targetIdx + 1 < displayedCompactParagraphs.length) {
+            if (targetIdx + 1 < paragraphs.length) {
               handleToggleAudiobookPlayback(targetIdx + 1);
             } else {
               setIsPlayingAudio(false);
@@ -273,7 +353,6 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       // Fallback to Web Speech API
     }
 
-    // Immediate Web Speech Synthesis with Narrator Persona Pitch & Rate
     setIsGeneratingTts(false);
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(textToRead);
@@ -282,7 +361,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       speechSynthRef.current = utterance;
 
       utterance.onend = () => {
-        if (targetIdx + 1 < displayedCompactParagraphs.length) {
+        if (targetIdx + 1 < paragraphs.length) {
           handleToggleAudiobookPlayback(targetIdx + 1);
         } else {
           setIsPlayingAudio(false);
@@ -324,8 +403,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     {
       id: 'compact',
       numberLabel: 'COMPACT',
-      shortTitle: `${book.compactTotalPages}p Chapterwise`,
-      badgeNote: 'Club Edition',
+      shortTitle: `${book.compactTotalPages}p (${book.chapters.length} Ch.)`,
+      badgeNote: '1-to-1 Chapters',
       icon: <FileText className="w-4 h-4" />,
     },
     {
@@ -360,6 +439,32 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       aria-label="Active Book Reader Studio"
       className="bg-reader-paper border-[3px] border-[#111] shadow-brutal-lg rounded-none overflow-hidden flex flex-col"
     >
+      {/* Top Navigation & Compression Status Bar */}
+      {onBackToCatalog && (
+        <div className="px-4 py-2.5 bg-[#111] text-white border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={onBackToCatalog}
+            className="px-3 py-1 bg-[#F6C90E] text-[#111] font-display-brutal text-xs uppercase border-2 border-white flex items-center gap-1.5 cursor-pointer hover:bg-[#FFE047]"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Back to Discovery Hub</span>
+          </button>
+
+          <div className="flex flex-wrap items-center gap-3 font-mono-tech text-xs">
+            <span className="text-[#F6C90E] font-bold flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5" />
+              <span>
+                1-TO-1 CHAPTER ARCHITECTURE: {book.chapters.length} CHAPTERS → {book.chapters.length} COMPACT CHAPTERS
+              </span>
+            </span>
+            <span className="px-2 py-0.5 bg-neutral-800 border border-neutral-600 text-white">
+              {compressedChaptersCount} / {book.chapters.length} Chapters Compressed
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Top Book Header Strip with Original Book Poster */}
       <div
         className="px-4 py-3.5 border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-4"
@@ -380,6 +485,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               <span>{book.genre}</span>
               <span aria-hidden="true">·</span>
               <span>{book.year}</span>
+              <span aria-hidden="true">·</span>
+              <span className="bg-black/40 px-1.5 py-0.5 border border-white/40">
+                {book.isPreCompressed !== false
+                  ? 'PRE-PRESSED CLUB EDITION'
+                  : 'ON-DEMAND CHAPTER PRESS'}
+              </span>
             </div>
             <h2 className="font-display-brutal text-xl sm:text-2xl uppercase tracking-tight truncate">
               {book.title} — {book.author}
@@ -392,7 +503,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
         {/* Proportional Page Math Readout */}
         <div className="bg-[#111] text-[#F6C90E] px-3 py-1.5 border-2 border-white font-mono-tech text-xs font-bold shrink-0">
-          {book.originalTotalPages}p ORIGINAL → {book.compactTotalPages}p COMPACT ({compressionPercent}% CONDENSED · {book.chapters.length} CHAPTERS)
+          {book.originalTotalPages}p ORIGINAL → {book.compactTotalPages}p COMPACT ({compressionPercent}% CONDENSED · ALL {book.chapters.length} CHAPTERS)
         </div>
       </div>
 
@@ -432,7 +543,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         })}
       </div>
 
-      {/* Active Persona & Chapter Navigation Toolbar */}
+      {/* Active Persona & Per-Chapter Compression Toolbar */}
       <div className="px-4 py-2.5 bg-[#ECECEC] border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono-tech font-bold uppercase text-[#111]">
@@ -473,19 +584,39 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={handleGenerateAiPersonaSummary}
-          disabled={isAiRewriting}
-          className="px-3 py-1.5 bg-[#E50914] hover:bg-[#B8000A] text-white border-2 border-[#111] shadow-brutal-sm font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
-        >
-          <Sparkles className="w-3.5 h-3.5" />
-          <span>
-            {isAiRewriting
-              ? 'Composing Chapter...'
-              : `Compose in ${activeAuthorDisplayName}'s Voice`}
-          </span>
-        </button>
+        <div className="flex items-center gap-2">
+          {compressedChaptersCount < book.chapters.length && (
+            <button
+              type="button"
+              onClick={handleCompressAllChaptersSequentially}
+              disabled={isBatchCompressing || isAiRewriting}
+              className="px-3 py-1.5 bg-[#0047FF] hover:bg-[#0039CC] text-white border-2 border-[#111] shadow-brutal-sm font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
+            >
+              <Cpu className="w-3.5 h-3.5" />
+              <span>
+                {isBatchCompressing
+                  ? 'Compressing Chapters...'
+                  : `Compress All ${book.chapters.length} Chapters`}
+              </span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={handleCompressCurrentChapter}
+            disabled={isAiRewriting || isBatchCompressing}
+            className="px-3 py-1.5 bg-[#E50914] hover:bg-[#B8000A] text-white border-2 border-[#111] shadow-brutal-sm font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>
+              {isAiRewriting
+                ? `Compressing Ch. ${currentChapter.number}...`
+                : currentChapterIsCompressed
+                ? `Re-Compress Ch. ${currentChapter.number} as ${activeAuthorDisplayName}`
+                : `Compress Ch. ${currentChapter.number} (${currentChapter.originalPages}p → ${currentChapter.compactPages}p)`}
+            </span>
+          </button>
+        </div>
       </div>
 
       {aiStatusBanner && (
@@ -501,9 +632,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         </div>
       )}
 
-      {/* Main Reader Body: Chapter Sidebar + Manuscript Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 min-h-[460px]">
-        {/* Left Chapter-wise Structure Sidebar */}
+      {/* Main Reader Body: 1-to-1 Chapter Index Sidebar + Manuscript Content */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 min-h-[520px]">
+        {/* Left Chapter-wise Structure Sidebar (Scrollable for 18-30+ Chapters) */}
         <aside
           aria-label="Chapter Table of Contents"
           className="lg:col-span-4 border-b-[3px] lg:border-b-0 lg:border-r-[3px] border-[#111] bg-[#F3EFE6] p-3 flex flex-col justify-between"
@@ -511,16 +642,17 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           <div>
             <div className="flex items-center justify-between pb-2 mb-2 border-b-2 border-[#111]">
               <span className="font-display-brutal text-xs uppercase tracking-wider">
-                CHAPTER INDEX ({book.chapters.length})
+                CHAPTER INDEX ({book.chapters.length} CHAPTERS)
               </span>
               <span className="font-mono-tech text-[11px] font-bold">
                 ORIG → COMPACT
               </span>
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
               {book.chapters.map((ch, idx) => {
                 const isSelected = idx === selectedChapterIdx;
+                const chCompressed = isChapterCompressed(ch);
                 return (
                   <button
                     key={ch.id}
@@ -536,10 +668,22 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                     }`}
                   >
                     <div className="min-w-0">
-                      <div className="font-mono-tech text-[10px] uppercase opacity-75">
-                        CHAPTER 0{ch.number}
+                      <div className="flex items-center gap-1.5 font-mono-tech text-[10px] uppercase opacity-80">
+                        <span>
+                          CHAPTER {ch.number < 10 ? `0${ch.number}` : ch.number}
+                        </span>
+                        <span>·</span>
+                        {chCompressed ? (
+                          <span className="text-[#10B981] font-bold flex items-center gap-0.5">
+                            <CheckCircle2 className="w-3 h-3 inline" /> READY
+                          </span>
+                        ) : (
+                          <span className="text-[#F59E0B] font-bold flex items-center gap-0.5">
+                            <Clock className="w-3 h-3 inline" /> ON-DEMAND
+                          </span>
+                        )}
                       </div>
-                      <div className="font-bold text-xs leading-snug line-clamp-2">
+                      <div className="font-bold text-xs leading-snug line-clamp-2 mt-0.5">
                         {ch.title.replace(/^Chapter\s+\d+[:.-]?\s*/i, '')}
                       </div>
                     </div>
@@ -547,6 +691,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                       className={`font-mono-tech text-[11px] font-bold px-1.5 py-0.5 border shrink-0 ${
                         isSelected
                           ? 'bg-[#F6C90E] text-[#111] border-[#F6C90E]'
+                          : chCompressed
+                          ? 'bg-[#D1FAE5] text-[#065F46] border-[#111]'
                           : 'bg-[#F3EFE6] text-[#111] border-[#111]'
                       }`}
                     >
@@ -561,12 +707,13 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           {/* Chapter Proportional Ratio Footnote */}
           <div className="mt-4 p-2.5 bg-white border-2 border-[#111] text-[11px] leading-relaxed">
             <div className="font-display-brutal uppercase text-[#E50914] text-xs">
-              Chapter-Preserving Condensation
+              1-to-1 Per-Chapter Compression
             </div>
             <p className="mt-1 text-[#222]">
-              Every chapter of the {book.originalTotalPages}-page volume is
-              preserved in sequence across a {book.compactTotalPages}-page
-              reading edition.
+              All <strong>{book.chapters.length} chapters</strong> of this{' '}
+              {book.originalTotalPages}-page volume are preserved individually—compress
+              any chapter on demand into its {currentChapter.compactPages}-page
+              Compact counterpart.
             </p>
           </div>
         </aside>
@@ -579,7 +726,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    UNABRIDGED ARCHIVE TEXT
+                    UNABRIDGED ARCHIVE TEXT · CHAPTER {currentChapter.number} OF {book.chapters.length}
                   </span>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
                     {currentChapter.title}
@@ -600,13 +747,15 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
           )}
 
-          {/* MODE 2: COMPACT EDITION */}
+          {/* MODE 2: COMPACT EDITION (WITH ON-DEMAND PER-CHAPTER COMPRESSION) */}
           {activeMode === 'compact' && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <div className="flex items-center gap-2 text-xs font-mono-tech font-bold text-[#0047FF]">
-                    <span>COMPACT CHAPTERWISE EDITION</span>
+                    <span>
+                      CHAPTER {currentChapter.number} OF {book.chapters.length} · COMPACT EDITION
+                    </span>
                     <span aria-hidden="true">·</span>
                     <span>CURATED BY {activeAuthorDisplayName.toUpperCase()}</span>
                   </div>
@@ -647,28 +796,91 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 </button>
               </div>
 
-              {/* Proportional Chapterwise Paragraphs */}
-              <div className="space-y-4 font-editorial text-base leading-relaxed text-[#111]">
-                {displayedCompactParagraphs.map((para, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3.5 bg-white border-2 border-[#111] relative"
-                  >
-                    <div className="flex items-center justify-between mb-1.5 font-mono-tech text-[11px] text-[#555]">
-                      <span>
-                        COMPACT PAGE{' '}
-                        {book.chapters
-                          .slice(0, selectedChapterIdx)
-                          .reduce((acc, c) => acc + c.compactPages, 0) +
-                          Math.min(currentChapter.compactPages, idx * 2 + 1)}{' '}
-                        OF {book.compactTotalPages}
-                      </span>
-                      <span>CHAPTER {currentChapter.number} · SECTION {idx + 1}</span>
-                    </div>
-                    <p>{para}</p>
+              {/* If this chapter of a newly discovered book is not yet compressed, show the On-Demand Chapter Press Card */}
+              {!currentChapterIsCompressed ? (
+                <div className="p-6 bg-white border-[3px] border-[#111] shadow-brutal space-y-4">
+                  <div className="flex items-center justify-between gap-2 border-b-2 border-[#111] pb-3">
+                    <span className="font-mono-tech text-xs font-bold uppercase px-2 py-0.5 bg-[#F6C90E] border border-[#111]">
+                      UNCOMPRESSED CHAPTER · ON-DEMAND CHAPTER PRESS
+                    </span>
+                    <span className="font-mono-tech text-xs font-bold text-[#E50914]">
+                      Chapter {currentChapter.number} of {book.chapters.length}
+                    </span>
                   </div>
-                ))}
-              </div>
+
+                  <h4 className="font-display-brutal text-lg uppercase text-[#111]">
+                    Ready to Compress &ldquo;{currentChapter.title}&rdquo; ({currentChapter.originalPages}p → {currentChapter.compactPages}p)
+                  </h4>
+
+                  <p className="text-sm text-[#333] leading-relaxed">
+                    New volumes in the Global Archive keep all{' '}
+                    <strong>{book.chapters.length} chapters</strong> uncompressed until
+                    you select them. Click below to condense{' '}
+                    <strong>Chapter {currentChapter.number}</strong> from{' '}
+                    {currentChapter.originalPages} original pages into{' '}
+                    {currentChapter.compactPages} proportional compact pages in the
+                    voice of <strong>{activeAuthorDisplayName}</strong>.
+                  </p>
+
+                  <div className="p-3 bg-[#F3EFE6] border-2 border-[#111] font-editorial text-xs text-[#444] italic">
+                    Unabridged Preview: &ldquo;{currentChapter.originalText[0]?.slice(0, 220)}...&rdquo;
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleCompressCurrentChapter}
+                      disabled={isAiRewriting}
+                      className="px-5 py-2.5 bg-[#E50914] hover:bg-[#B8000A] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm flex items-center gap-2 cursor-pointer"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>
+                        {isAiRewriting
+                          ? 'Compressing Chapter...'
+                          : `Compress Chapter ${currentChapter.number} Now (${currentChapter.originalPages}p → ${currentChapter.compactPages}p)`}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCompressAllChaptersSequentially}
+                      disabled={isBatchCompressing}
+                      className="px-4 py-2.5 bg-[#111] hover:bg-[#222] text-[#F6C90E] font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm flex items-center gap-2 cursor-pointer"
+                    >
+                      <Cpu className="w-4 h-4" />
+                      <span>
+                        {isBatchCompressing
+                          ? 'Compressing All Chapters...'
+                          : `Compress All ${book.chapters.length} Chapters Sequentially`}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 font-editorial text-base leading-relaxed text-[#111]">
+                  {displayedCompactParagraphs.map((para, idx) => (
+                    <div
+                      key={idx}
+                      className="p-3.5 bg-white border-2 border-[#111] relative"
+                    >
+                      <div className="flex items-center justify-between mb-1.5 font-mono-tech text-[11px] text-[#555]">
+                        <span>
+                          COMPACT PAGE{' '}
+                          {book.chapters
+                            .slice(0, selectedChapterIdx)
+                            .reduce((acc, c) => acc + c.compactPages, 0) +
+                            Math.min(currentChapter.compactPages, idx + 1)}{' '}
+                          OF {book.compactTotalPages}
+                        </span>
+                        <span>
+                          CHAPTER {currentChapter.number} OF {book.chapters.length} · SECTION {idx + 1}
+                        </span>
+                      </div>
+                      <p>{para}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -727,7 +939,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
                     {bulletScope === 'chapter'
                       ? `${currentChapter.title} — Chapter Key Points`
-                      : `${book.title} — Complete Volume Key Points`}
+                      : `${book.title} — All ${book.chapters.length} Chapters Key Points`}
                   </h3>
                 </div>
 
@@ -758,24 +970,44 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 </div>
               </div>
 
-              <ul className="space-y-2.5">
-                {(bulletScope === 'chapter'
-                  ? displayedChapterBullets
-                  : book.masterBookBullets
-                ).map((item, idx) => (
-                  <li
-                    key={idx}
-                    className="p-3.5 bg-white border-2 border-[#111] shadow-brutal-sm flex items-start gap-3"
+              {bulletScope === 'chapter' && !currentChapterIsCompressed ? (
+                <div className="p-5 bg-white border-2 border-[#111] shadow-brutal-sm flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="font-display-brutal text-sm uppercase text-[#111]">
+                      Chapter {currentChapter.number} Takeaways Not Yet Pressed
+                    </div>
+                    <p className="text-xs text-[#444] mt-0.5">
+                      Compress Chapter {currentChapter.number} on demand to extract its structured key takeaways.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCompressCurrentChapter}
+                    className="px-4 py-2 bg-[#E50914] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm cursor-pointer"
                   >
-                    <span className="w-6 h-6 bg-[#E50914] text-white font-mono-tech text-xs font-bold flex items-center justify-center border border-[#111] shrink-0 mt-0.5">
-                      0{idx + 1}
-                    </span>
-                    <span className="text-sm sm:text-base font-medium text-[#111] leading-relaxed">
-                      {item}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+                    Compress Chapter {currentChapter.number} →
+                  </button>
+                </div>
+              ) : (
+                <ul className="space-y-2.5 max-h-[420px] overflow-y-auto pr-1">
+                  {(bulletScope === 'chapter'
+                    ? displayedChapterBullets
+                    : book.masterBookBullets
+                  ).map((item, idx) => (
+                    <li
+                      key={idx}
+                      className="p-3.5 bg-white border-2 border-[#111] shadow-brutal-sm flex items-start gap-3"
+                    >
+                      <span className="w-6 h-6 bg-[#E50914] text-white font-mono-tech text-xs font-bold flex items-center justify-center border border-[#111] shrink-0 mt-0.5">
+                        {idx + 1 < 10 ? `0${idx + 1}` : idx + 1}
+                      </span>
+                      <span className="text-sm sm:text-base font-medium text-[#111] leading-relaxed">
+                        {item}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 
@@ -785,7 +1017,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    COMPACT EDITION AUDIOBOOK STUDIO
+                    COMPACT EDITION AUDIOBOOK STUDIO · CHAPTER {currentChapter.number} OF {book.chapters.length}
                   </span>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
                     {currentChapter.title} ({currentChapter.compactPages}p Audio Edition)
@@ -873,7 +1105,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                       {isPlayingAudio ? (
                         <>
                           <Pause className="w-4 h-4 fill-current" />
-                          <span>Pause Compact Audio</span>
+                          <span>Pause Studio Audio</span>
                         </>
                       ) : (
                         <>
@@ -881,7 +1113,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                           <span>
                             {isGeneratingTts
                               ? 'Synthesizing Voice...'
-                              : 'Play Compact Audiobook'}
+                              : !currentChapterIsCompressed
+                              ? `Compress & Play Ch. ${currentChapter.number}`
+                              : `Play Ch. ${currentChapter.number} Audio`}
                           </span>
                         </>
                       )}
@@ -892,7 +1126,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                       aria-label="Next paragraph"
                       onClick={() => {
                         const next = Math.min(
-                          displayedCompactParagraphs.length - 1,
+                          Math.max(0, displayedCompactParagraphs.length - 1),
                           activeAudioParagraphIdx + 1
                         );
                         handleToggleAudiobookPlayback(next);
@@ -926,37 +1160,43 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               </div>
 
               {/* Synchronized Compact Transcript Cards */}
-              <div className="space-y-2.5">
-                {displayedCompactParagraphs.map((para, idx) => {
-                  const isCurrent = idx === activeAudioParagraphIdx;
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => handleToggleAudiobookPlayback(idx)}
-                      className={`w-full text-left p-3.5 border-2 border-[#111] transition-colors cursor-pointer block ${
-                        isCurrent
-                          ? 'bg-[#F6C90E]/35 shadow-brutal-sm'
-                          : 'bg-white hover:bg-neutral-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between text-[11px] font-mono-tech font-bold mb-1">
-                        <span className="text-[#E50914]">
-                          COMPACT AUDIO TRACK {currentChapter.number}.{idx + 1}
-                        </span>
-                        <span>
-                          {isCurrent && isPlayingAudio
-                            ? '▶ NARRATING NOW'
-                            : 'CLICK TO LISTEN'}
-                        </span>
-                      </div>
-                      <p className="font-editorial text-sm sm:text-base text-[#111] leading-relaxed">
-                        {para}
-                      </p>
-                    </button>
-                  );
-                })}
-              </div>
+              {!currentChapterIsCompressed ? (
+                <div className="p-4 bg-white border-2 border-[#111] text-xs font-mono-tech">
+                  Click <strong>&ldquo;Compress &amp; Play Ch. {currentChapter.number}&rdquo;</strong> above to press this chapter into a Compact Audio script and begin narration.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {displayedCompactParagraphs.map((para, idx) => {
+                    const isCurrent = idx === activeAudioParagraphIdx;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => handleToggleAudiobookPlayback(idx)}
+                        className={`w-full text-left p-3.5 border-2 border-[#111] transition-colors cursor-pointer block ${
+                          isCurrent
+                            ? 'bg-[#F6C90E]/35 shadow-brutal-sm'
+                            : 'bg-white hover:bg-neutral-50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between text-[11px] font-mono-tech font-bold mb-1">
+                          <span className="text-[#E50914]">
+                            STUDIO AUDIO TRACK {currentChapter.number}.{idx + 1}
+                          </span>
+                          <span>
+                            {isCurrent && isPlayingAudio
+                              ? '▶ NARRATING NOW'
+                              : 'CLICK TO LISTEN'}
+                          </span>
+                        </div>
+                        <p className="font-editorial text-sm sm:text-base text-[#111] leading-relaxed">
+                          {para}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
