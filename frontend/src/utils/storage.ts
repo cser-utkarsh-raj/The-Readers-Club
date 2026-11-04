@@ -257,21 +257,57 @@ export function migratePersistedState(raw: unknown): PersistedClubAppStateV2 {
   return baseState;
 }
 
+export interface StorageWriteResult {
+  state: PersistedClubAppStateV2;
+  localStorageSucceeded: boolean;
+  quotaExceeded: boolean;
+  storageWarning?: string;
+}
+
+export interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
+}
+
+let customTestLocalStorage: StorageLike | null = null;
+let customTestIdbStore: Map<string, BookItem> | null = null;
+
+/**
+ * Allows unit tests in Node.js to inject deterministic storage and IndexedDB mocks.
+ */
+export function configureTestStorageAdapters(options: {
+  localStorage?: StorageLike | null;
+  idbMap?: Map<string, BookItem> | null;
+}): void {
+  customTestLocalStorage = options.localStorage ?? null;
+  customTestIdbStore = options.idbMap ?? null;
+}
+
+function getActiveLocalStorage(): StorageLike | null {
+  if (customTestLocalStorage) return customTestLocalStorage;
+  if (typeof window !== 'undefined' && window.localStorage) {
+    return window.localStorage;
+  }
+  return null;
+}
+
 /**
  * Loads persisted state synchronously from `localStorage` (with automatic v1 -> v2 migration).
  */
 export function loadPersistedAppState(): PersistedClubAppStateV2 {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const storage = getActiveLocalStorage();
+  if (!storage) {
     return migratePersistedState(null);
   }
 
   try {
-    const rawV2 = window.localStorage.getItem(LOCAL_STORAGE_STATE_KEY);
+    const rawV2 = storage.getItem(LOCAL_STORAGE_STATE_KEY);
     if (rawV2) {
       return migratePersistedState(JSON.parse(rawV2));
     }
 
-    const rawV1 = window.localStorage.getItem(LEGACY_LOCAL_STORAGE_KEY_V1);
+    const rawV1 = storage.getItem(LEGACY_LOCAL_STORAGE_KEY_V1);
     if (rawV1) {
       const migrated = migratePersistedState(JSON.parse(rawV1));
       savePersistedAppState(migrated);
@@ -286,11 +322,15 @@ export function loadPersistedAppState(): PersistedClubAppStateV2 {
 
 /**
  * Persists application state to `localStorage` with quota protection.
- * Also mirrors large custom manuscripts into `IndexedDB` when available.
+ * Never silently truncates chapter paragraphs into a partial chapter claiming to be complete:
+ * if `localStorage` quota is exceeded, `localStorage` stores only lightweight book metadata shells
+ * while full book manuscripts are persisted to `IndexedDB`.
  */
 export function savePersistedAppState(
-  state: Partial<PersistedClubAppStateV2>
+  state: Partial<PersistedClubAppStateV2>,
+  options: { syncIndexedDb?: boolean } = {}
 ): PersistedClubAppStateV2 {
+  const { syncIndexedDb = true } = options;
   const current = loadPersistedAppState();
   const merged: PersistedClubAppStateV2 = {
     ...current,
@@ -299,26 +339,24 @@ export function savePersistedAppState(
     savedAt: new Date().toISOString(),
   };
 
-  if (typeof window !== 'undefined' && window.localStorage) {
+  const storage = getActiveLocalStorage();
+  if (storage) {
     try {
-      window.localStorage.setItem(
-        LOCAL_STORAGE_STATE_KEY,
-        JSON.stringify(merged)
-      );
+      storage.setItem(LOCAL_STORAGE_STATE_KEY, JSON.stringify(merged));
     } catch {
-      // If localStorage quota is exceeded due to very large uploaded book texts,
-      // store a compact representation in localStorage and full chapters in IndexedDB
+      // QuotaExceededError: Never silently truncate chapter paragraphs to 30 and pretend it is complete!
+      // Instead, store lightweight book metadata shells in localStorage and rely on IndexedDB for full chapter text.
       try {
-        const trimmedBooks = merged.customBooks.slice(0, 25).map((b) => ({
+        const metadataShellBooks = merged.customBooks.slice(0, 50).map((b) => ({
           ...b,
-          chapters: b.chapters.map((ch) => ({
-            ...ch,
-            originalText: ch.originalText.slice(0, 30),
-          })),
+          chapters: [],
+          extractionError:
+            b.extractionError ||
+            'Full manuscript stored in IndexedDB (localStorage quota exceeded).',
         }));
-        window.localStorage.setItem(
+        storage.setItem(
           LOCAL_STORAGE_STATE_KEY,
-          JSON.stringify({ ...merged, customBooks: trimmedBooks })
+          JSON.stringify({ ...merged, customBooks: metadataShellBooks })
         );
       } catch {
         // Ignore storage write failure in restricted iframe environments
@@ -326,7 +364,9 @@ export function savePersistedAppState(
     }
   }
 
-  void saveBooksToIndexedDb(merged.customBooks);
+  if (syncIndexedDb) {
+    void saveBooksToIndexedDb(merged.customBooks);
+  }
   return merged;
 }
 
@@ -355,21 +395,106 @@ function openClubIndexedDb(): Promise<IDBDatabase | null> {
   });
 }
 
-export async function saveBooksToIndexedDb(books: BookItem[]): Promise<void> {
-  const db = await openClubIndexedDb();
-  if (!db) return;
-  try {
-    const tx = db.transaction(IDB_STORE_BOOKS, 'readwrite');
-    const store = tx.objectStore(IDB_STORE_BOOKS);
-    for (const book of books) {
-      store.put(book);
+/**
+ * Saves custom books to IndexedDB, awaiting transaction completion (`tx.oncomplete`)
+ * and reconciling removed books so deleted books do not reappear after reload.
+ */
+export async function saveBooksToIndexedDb(
+  books: BookItem[],
+  reconcileDeletions = true
+): Promise<boolean> {
+  if (customTestIdbStore) {
+    if (reconcileDeletions) {
+      const keepIds = new Set(books.map((b) => b.id));
+      for (const existingKey of Array.from(customTestIdbStore.keys())) {
+        if (!keepIds.has(existingKey)) {
+          customTestIdbStore.delete(existingKey);
+        }
+      }
     }
-  } catch {
-    // Ignore IDB transaction errors
+    for (const book of books) {
+      customTestIdbStore.set(book.id, structuredClone(book));
+    }
+    return true;
   }
+
+  const db = await openClubIndexedDb();
+  if (!db) return false;
+
+  return new Promise<boolean>((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_BOOKS, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_BOOKS);
+
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+
+      const writeCurrentBooks = () => {
+        for (const book of books) {
+          store.put(book);
+        }
+      };
+
+      if (reconcileDeletions) {
+        const keysReq = store.getAllKeys();
+        keysReq.onsuccess = () => {
+          const keepIds = new Set(books.map((b) => b.id));
+          const existingKeys = Array.isArray(keysReq.result)
+            ? keysReq.result
+            : [];
+          for (const key of existingKeys) {
+            if (typeof key === 'string' && !keepIds.has(key)) {
+              store.delete(key);
+            }
+          }
+          writeCurrentBooks();
+        };
+        keysReq.onerror = () => {
+          writeCurrentBooks();
+        };
+      } else {
+        writeCurrentBooks();
+      }
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Deletes a single book by ID from IndexedDB and awaits transaction completion.
+ */
+export async function deleteBookFromIndexedDb(bookId: string): Promise<boolean> {
+  if (!bookId) return false;
+  if (customTestIdbStore) {
+    return customTestIdbStore.delete(bookId);
+  }
+
+  const db = await openClubIndexedDb();
+  if (!db) return false;
+
+  return new Promise<boolean>((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE_BOOKS, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_BOOKS);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+      store.delete(bookId);
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
 export async function loadBooksFromIndexedDb(): Promise<BookItem[]> {
+  if (customTestIdbStore) {
+    return Array.from(customTestIdbStore.values()).map((b) =>
+      structuredClone(b)
+    );
+  }
+
   const db = await openClubIndexedDb();
   if (!db) return [];
   return new Promise((resolve) => {

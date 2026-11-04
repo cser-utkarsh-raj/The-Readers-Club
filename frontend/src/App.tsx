@@ -33,8 +33,10 @@ import {
   FileExtractionResult,
   extractTextFromUploadedFile,
 } from './utils/fileExtractor';
+import { deduplicateCatalogBooks } from './utils/catalogIntegrity';
 import {
   CachedSummaryEntry,
+  deleteBookFromIndexedDb,
   loadBooksFromIndexedDb,
   loadPersistedAppState,
   savePersistedAppState,
@@ -138,26 +140,34 @@ export default function App() {
   const [isProcessingUpload, setIsProcessingUpload] = useState(false);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
 
+  const [isIdbHydrated, setIsIdbHydrated] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const discoveryDeckRef = useRef<HTMLDivElement | null>(null);
 
   // Hydrate full custom books from IndexedDB on mount
   useEffect(() => {
     let mounted = true;
-    loadBooksFromIndexedDb().then((idbBooks) => {
-      if (!mounted || idbBooks.length === 0) return;
-      setBooks((prev) => {
-        const idbMap = new Map(idbBooks.map((b) => [b.id, b]));
-        const merged = prev.map((b) => idbMap.get(b.id) || b);
-        const existingIds = new Set(merged.map((b) => b.id));
-        for (const ib of idbBooks) {
-          if (!existingIds.has(ib.id)) {
-            merged.unshift(ib);
-          }
+    loadBooksFromIndexedDb()
+      .then((idbBooks) => {
+        if (!mounted) return;
+        if (idbBooks.length > 0) {
+          setBooks((prev) => {
+            const idbMap = new Map(idbBooks.map((b) => [b.id, b]));
+            const merged = prev.map((b) => idbMap.get(b.id) || b);
+            const existingIds = new Set(merged.map((b) => b.id));
+            for (const ib of idbBooks) {
+              if (!existingIds.has(ib.id)) {
+                merged.unshift(ib);
+              }
+            }
+            return merged;
+          });
         }
-        return merged;
+      })
+      .finally(() => {
+        if (mounted) setIsIdbHydrated(true);
       });
-    });
     return () => {
       mounted = false;
     };
@@ -174,14 +184,17 @@ export default function App() {
             c.summaryStatus === 'ai_generated' || c.summaryStatus === 'cached'
         )
     );
-    savePersistedAppState({
-      settings,
-      tasteProfile,
-      readingProgressByBookId,
-      customBooks,
-      summaryCache,
-      lastActiveBookId: selectedBookId,
-    });
+    savePersistedAppState(
+      {
+        settings,
+        tasteProfile,
+        readingProgressByBookId,
+        customBooks,
+        summaryCache,
+        lastActiveBookId: selectedBookId,
+      },
+      { syncIndexedDb: isIdbHydrated }
+    );
   }, [
     books,
     settings,
@@ -189,7 +202,30 @@ export default function App() {
     readingProgressByBookId,
     summaryCache,
     selectedBookId,
+    isIdbHydrated,
   ]);
+
+  function handleRemoveBookFromLibrary(bookId: string) {
+    const seedIds = new Set(OPEN_SOURCE_BOOKS.map((b) => b.id));
+    if (seedIds.has(bookId)) return;
+
+    void deleteBookFromIndexedDb(bookId);
+    setBooks((prev) => {
+      const remaining = prev.filter((b) => b.id !== bookId);
+      const nextActiveId =
+        selectedBookId === bookId
+          ? remaining[0]?.id || OPEN_SOURCE_BOOKS[0].id
+          : selectedBookId;
+      setSelectedBookId(nextActiveId);
+      return remaining;
+    });
+    setReadingProgressByBookId((prev) => {
+      const next = { ...prev };
+      delete next[bookId];
+      return next;
+    });
+    navigateToPage('home');
+  }
 
   function navigateToPage(page: AppPageRoute) {
     setActivePage(page);
@@ -233,26 +269,21 @@ export default function App() {
     ] || GLOBAL_CATALOG_BOOKS[0];
 
   const combinedArchivePool = useMemo(() => {
-    const seen = new Set<string>();
-    const merged: ExternalCatalogBook[] = [];
-    for (const item of [...GLOBAL_CATALOG_BOOKS, ...liveApiBooks]) {
-      const key = `${item.title.toLowerCase()}::${item.author.toLowerCase()}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        merged.push({
-          ...item,
-          availabilityStatus:
-            item.availabilityStatus ||
-            (item.gutenbergId ? 'full_text' : 'metadata_only'),
-          sourceAttribution:
-            item.sourceAttribution ||
-            (item.gutenbergId
-              ? `Project Gutenberg Public Domain Archive (#${item.gutenbergId})`
-              : 'Google Books Discovery Catalog (Metadata Only)'),
-        });
-      }
-    }
-    return merged;
+    const deduped = deduplicateCatalogBooks([
+      ...GLOBAL_CATALOG_BOOKS,
+      ...liveApiBooks,
+    ]);
+    return deduped.uniqueBooks.map((item) => ({
+      ...item,
+      availabilityStatus:
+        item.availabilityStatus ||
+        (item.gutenbergId ? 'external_source_available' : 'metadata_only'),
+      sourceAttribution:
+        item.sourceAttribution ||
+        (item.gutenbergId
+          ? `Project Gutenberg Public Domain Archive (#${item.gutenbergId})`
+          : 'Google Books Discovery Catalog (Metadata Only)'),
+    }));
   }, [liveApiBooks]);
 
   const filteredArchiveBooks = useMemo(() => {
@@ -293,7 +324,11 @@ export default function App() {
   const worldClassicsShelf = useMemo(() => {
     return combinedArchivePool
       .filter(
-        (b) => b.availabilityStatus === 'full_text' || Boolean(b.gutenbergId)
+        (b) =>
+          b.availabilityStatus === 'full_text' ||
+          b.availabilityStatus === 'full_text_available' ||
+          b.availabilityStatus === 'external_source_available' ||
+          Boolean(b.gutenbergId)
       )
       .slice(0, 12);
   }, [combinedArchivePool]);
@@ -1095,8 +1130,8 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                           <span className="px-1.5 py-0.5 bg-[#E50914] text-white border border-white">
                             FEATURED BOOK
                           </span>
-                          <span className="px-1.5 py-0.5 bg-[#10B981] text-[#111] font-extrabold">
-                            FULL TEXT · GUTENBERG #{currentFeaturedBook.gutenbergId}
+                          <span className="px-1.5 py-0.5 bg-[#0EA5E9] text-[#111] font-extrabold">
+                            GUTENBERG SOURCE · #{currentFeaturedBook.gutenbergId}
                           </span>
                         </div>
 
@@ -1279,11 +1314,11 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                             <span
                               className={`absolute top-2 right-2 z-20 px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold border border-[#111] ${
                                 isFullText
-                                  ? 'bg-[#10B981] text-[#111]'
+                                  ? 'bg-[#0EA5E9] text-[#111]'
                                   : 'bg-[#F97316] text-[#111]'
                               }`}
                             >
-                              {isFullText ? 'FULL TEXT' : 'METADATA ONLY'}
+                              {isFullText ? 'GUTENBERG SOURCE' : 'METADATA ONLY'}
                             </span>
                           </div>
                           <div className="p-2.5 flex-1 flex flex-col justify-between">
@@ -1501,7 +1536,7 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                         coverAccent={b.coverAccent}
                       />
                       <span className="absolute top-2 right-2 z-20 bg-[#F6C90E] text-[#111] border border-[#111] px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold">
-                        CURATED
+                        CONDENSED EDITION
                       </span>
                     </div>
 
@@ -1515,6 +1550,9 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                         </div>
                         <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
                           {b.author}
+                        </div>
+                        <div className="text-[10px] font-mono-tech text-[#666] truncate mt-1">
+                          {b.verifiedChapterCount || b.chapters.length} Editorial Sections
                         </div>
                       </div>
                     </div>
@@ -1557,8 +1595,8 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                         author={item.author}
                         coverUrl={item.coverUrl}
                       />
-                      <span className="absolute top-2 right-2 z-20 bg-[#10B981] text-[#111] border border-[#111] px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold">
-                        FULL TEXT
+                      <span className="absolute top-2 right-2 z-20 bg-[#0EA5E9] text-[#111] border border-[#111] px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold">
+                        GUTENBERG SOURCE
                       </span>
                     </div>
 
@@ -1710,11 +1748,11 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                           <span
                             className={`absolute top-2 right-2 z-20 px-1.5 py-0.5 font-mono-tech text-[9px] font-extrabold border border-[#111] ${
                               isFullText
-                                ? 'bg-[#10B981] text-[#111]'
+                                ? 'bg-[#0EA5E9] text-[#111]'
                                 : 'bg-[#F97316] text-[#111]'
                             }`}
                           >
-                            {isFullText ? 'FULL TEXT' : 'METADATA ONLY'}
+                            {isFullText ? 'GUTENBERG SOURCE' : 'METADATA ONLY'}
                           </span>
                         </div>
 
@@ -1782,6 +1820,10 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
             onOpenSettingsTab={() => navigateToPage('voices')}
             onOpenUploadTab={() => navigateToPage('press')}
             onBackToCatalog={() => navigateToPage('home')}
+            canRemoveFromLibrary={
+              !OPEN_SOURCE_BOOKS.some((b) => b.id === activeBook.id)
+            }
+            onRemoveBookFromLibrary={handleRemoveBookFromLibrary}
           />
         </main>
       )}

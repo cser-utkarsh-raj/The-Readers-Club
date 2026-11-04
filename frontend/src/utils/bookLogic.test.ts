@@ -25,10 +25,19 @@ import {
   clearTtsDeduplicationCache,
   deriveAudioEngineStatus,
   generateSingleTtsChunkWithRetry,
+  getActiveTrackedObjectUrlCount,
   isAudiobookReady,
   revokeAllTrackedAudioObjectUrls,
 } from './ttsEngine';
-import { migratePersistedState } from './storage';
+import {
+  configureTestStorageAdapters,
+  deleteBookFromIndexedDb,
+  loadBooksFromIndexedDb,
+  loadPersistedAppState,
+  migratePersistedState,
+  saveBooksToIndexedDb,
+  savePersistedAppState,
+} from './storage';
 import {
   parseGutenbergPlainTextChapters,
   resolveMascotModelTier,
@@ -37,6 +46,14 @@ import {
   validateSummarizeRequest,
 } from '../../../backend/src/server';
 import { ExternalCatalogBook, UserTasteProfile } from '../types/book';
+import {
+  auditCatalogIntegrity,
+  classifyBookContentAvailability,
+  deduplicateCatalogBooks,
+  validateGutenbergSourceMetadata,
+} from './catalogIntegrity';
+import { OPEN_SOURCE_BOOKS } from '../data/openSourceBooks';
+import { GLOBAL_CATALOG_BOOKS } from '../data/globalCatalogSeed';
 
 // ============================================================================
 // 1. EPUB MANIFEST & SPINE ORDERING TESTS
@@ -237,14 +254,18 @@ test('buildBookFromExternalCatalogItem and hydrateBookWithGutenbergChapters hand
     author: 'Jane Austen',
     year: '1813',
     genre: 'Classic Romance',
+    chapterCount: 61,
     coverUrl: 'https://www.gutenberg.org/cache/epub/1342/pg1342.cover.medium.jpg',
     description: 'Jane Austen classic novel.',
     sourceApi: 'gutendex',
   };
 
-  // Before hydration, chapters array is empty (no synthetic description chapters)
+  // Before hydration, chapters array is empty and status is external_source_available (not claiming local full text yet)
   const unhydrated = buildBookFromExternalCatalogItem(gutenbergCatalogItem);
-  assert.equal(unhydrated.availabilityStatus, 'full_text');
+  assert.equal(unhydrated.availabilityStatus, 'external_source_available');
+  assert.equal(unhydrated.chapterStructure, 'unparsed');
+  assert.equal(unhydrated.verifiedChapterCount, 0);
+  assert.equal(unhydrated.estimatedChapterCount, 61);
   assert.equal(unhydrated.chapters.length, 0);
 
   // Hydrate with real extracted Gutenberg chapters
@@ -267,35 +288,69 @@ test('buildBookFromExternalCatalogItem and hydrateBookWithGutenbergChapters hand
   ]);
 
   assert.equal(hydrated.availabilityStatus, 'full_text');
+  assert.equal(hydrated.chapterStructure, 'original_chapters');
+  assert.equal(hydrated.verifiedChapterCount, 2);
   assert.equal(hydrated.chapters.length, 2);
   assert.ok(hydrated.contentHash?.startsWith('fnv1a-'));
   assert.equal(hydrated.chapters[0].isCompressed, false);
 });
 
-test('parseGutenbergPlainTextChapters extracts full chapters without 5-paragraph truncation', () => {
-  const eightParas = Array.from(
-    { length: 8 },
+test('parseGutenbergPlainTextChapters extracts >80 chapters and >60 paragraphs per chapter without truncation', () => {
+  const seventyFiveParas = Array.from(
+    { length: 75 },
     (_, idx) =>
       `Paragraph number ${idx + 1} with more than sixty characters of authentic public domain prose from Project Gutenberg.`
   ).join('\n\n');
 
-  const sampleGutenberg = `*** START OF THE PROJECT GUTENBERG EBOOK SAMPLE ***
-CHAPTER I. The First Movement
+  const shortChapterBody = Array.from(
+    { length: 4 },
+    (_, idx) =>
+      `Chapter body paragraph ${idx + 1} with sufficient length to pass the 350-character table-of-contents filter cleanly.`
+  ).join('\n\n');
 
-${eightParas}
+  const chaptersText = Array.from({ length: 95 }, (_, cIdx) => {
+    const body = cIdx === 0 ? seventyFiveParas : shortChapterBody;
+    return `CHAPTER ${cIdx + 1}. The Movement Number ${cIdx + 1}\n\n${body}`;
+  }).join('\n\n');
 
-CHAPTER II. The Second Movement
-
-${eightParas}
-*** END OF THE PROJECT GUTENBERG EBOOK SAMPLE ***`;
+  const sampleGutenberg = `*** START OF THE PROJECT GUTENBERG EBOOK SAMPLE ***\n${chaptersText}\n*** END OF THE PROJECT GUTENBERG EBOOK SAMPLE ***`;
 
   const chapters = parseGutenbergPlainTextChapters(sampleGutenberg);
-  assert.equal(chapters.length, 2);
+  assert.equal(
+    chapters.length,
+    95,
+    'All 95 chapters must be preserved without an 80-chapter cap'
+  );
   assert.equal(
     chapters[0].originalText.length,
-    8,
-    'All 8 paragraphs must be preserved without .slice(0, 5) truncation'
+    75,
+    'All 75 paragraphs in Chapter 1 must be preserved without a 60-paragraph cap'
   );
+  assert.equal(chapters[0].chapterStructure, 'original_chapters');
+});
+
+test('buildBookFromExtractedText preserves >120 chapters without truncation', () => {
+  const raw130Chapters = Array.from(
+    { length: 130 },
+    (_, i) =>
+      `Chapter ${i + 1}: Chronicle Part ${i + 1}\n\nThis is the complete narrative paragraph for chapter ${i + 1}, containing over eighty characters of prose so it parses as a full chapter.`
+  ).join('\n\n');
+
+  const book = buildBookFromExtractedText(
+    'Epic 130-Chapter Tome',
+    'Classic Chronicler',
+    raw130Chapters,
+    'TXT'
+  );
+
+  assert.equal(book.availabilityStatus, 'full_text');
+  assert.equal(book.chapterStructure, 'original_chapters');
+  assert.equal(
+    book.chapters.length,
+    130,
+    'All 130 chapters must be preserved without a 120-chapter cap'
+  );
+  assert.equal(book.verifiedChapterCount, 130);
 });
 
 // ============================================================================
@@ -648,3 +703,344 @@ test('validateMascotChatRequest validates multi-turn history and routes task tie
   assert.equal(validChat.sanitized?.history[1].role, 'user');
 });
 
+// ============================================================================
+// 8. CATALOGUE INTEGRITY, DEDUPLICATION & SOURCE VALIDATION TESTS
+// ============================================================================
+
+test('deduplicateCatalogBooks deduplicates by Gutenberg ID and edition signature while preserving distinct editions', () => {
+  const duplicateList: ExternalCatalogBook[] = [
+    {
+      id: 'gut-1',
+      gutenbergId: 84,
+      title: 'Frankenstein; Or, The Modern Prometheus',
+      author: 'Mary Shelley',
+      year: '1818',
+      genre: 'Gothic',
+      coverUrl: 'https://www.gutenberg.org/cache/epub/84/pg84.cover.medium.jpg',
+      description: 'First record',
+    },
+    {
+      id: 'gut-2-dup-id',
+      gutenbergId: 84,
+      title: 'Frankenstein',
+      author: 'Mary Wollstonecraft Shelley',
+      year: '1818',
+      genre: 'Gothic',
+      coverUrl: 'https://www.gutenberg.org/cache/epub/84/pg84.cover.medium.jpg',
+      description: 'Duplicate Gutenberg ID 84',
+    },
+    {
+      id: 'gbooks-edition-2',
+      title: 'Frankenstein; Or, The Modern Prometheus',
+      author: 'Mary Shelley',
+      year: '1831',
+      genre: 'Gothic',
+      sourceApi: 'google_books',
+      coverUrl: 'https://example.com/frankenstein-1831.jpg',
+      description: 'Distinct 1831 revised edition from Google Books',
+    },
+    {
+      id: 'gbooks-edition-2-dup',
+      title: 'Frankenstein: Or, The Modern Prometheus!',
+      author: 'Mary Shelley',
+      year: '1831',
+      genre: 'Gothic',
+      sourceApi: 'google_books',
+      coverUrl: 'https://example.com/frankenstein-1831.jpg',
+      description: 'Exact duplicate of the 1831 Google Books edition',
+    },
+  ];
+
+  const deduped = deduplicateCatalogBooks(duplicateList);
+  assert.equal(deduped.uniqueBooks.length, 2);
+  assert.equal(deduped.duplicates.length, 2);
+  assert.equal(deduped.uniqueBooks[0].id, 'gut-1');
+  assert.equal(deduped.uniqueBooks[1].id, 'gbooks-edition-2');
+});
+
+test('classifyBookContentAvailability and validateGutenbergSourceMetadata enforce honest status and valid IDs', () => {
+  const curatedCondensed = OPEN_SOURCE_BOOKS[0];
+  assert.equal(
+    classifyBookContentAvailability(curatedCondensed),
+    'condensed_edition'
+  );
+
+  const externalSeed = GLOBAL_CATALOG_BOOKS[0];
+  assert.equal(
+    classifyBookContentAvailability(externalSeed),
+    'external_source_available'
+  );
+
+  const brokenGutenberg: ExternalCatalogBook = {
+    id: 'broken-1',
+    gutenbergId: -42,
+    title: 'Broken Book',
+    author: 'Unknown',
+    year: '1900',
+    genre: 'Fiction',
+    coverUrl: 'https://www.gutenberg.org/cache/epub/999/pg999.cover.medium.jpg',
+    description: 'Mismatched ID',
+  };
+  const validation = validateGutenbergSourceMetadata(brokenGutenberg);
+  assert.equal(validation.valid, false);
+  assert.ok(validation.reasons.length >= 1);
+
+  const report = auditCatalogIntegrity(OPEN_SOURCE_BOOKS, GLOBAL_CATALOG_BOOKS);
+  assert.equal(report.curatedBookRecords, 12);
+  assert.equal(report.globalCatalogRecords, 104);
+  assert.equal(report.uniqueBooksCount, 116);
+  assert.equal(report.brokenSourceMetadata.length, 0);
+});
+
+test('IndexedDB save, load, and delete reconciliation removes deleted books and preserves full manuscripts on quota fallback', async () => {
+  const idbMap = new Map();
+  const lsMap = new Map<string, string>();
+  let simulateQuotaFailureOnFirstWrite = false;
+
+  configureTestStorageAdapters({
+    idbMap,
+    localStorage: {
+      getItem: (k) => lsMap.get(k) ?? null,
+      setItem: (k, v) => {
+        if (simulateQuotaFailureOnFirstWrite && v.includes('Paragraph 45')) {
+          throw new Error('QuotaExceededError');
+        }
+        lsMap.set(k, v);
+      },
+    },
+  });
+
+  try {
+    const fiftyParas = Array.from(
+      { length: 50 },
+      (_, idx) =>
+        `Paragraph ${idx + 1} with substantial literary narrative content that exceeds fifty characters.`
+    );
+    const customBookA = buildBookFromExtractedText(
+      'Custom Volume Alpha',
+      'Author Alpha',
+      `Chapter 1: Opening\n\n${fiftyParas.join('\n\n')}\n\nChapter 2: Continuation\n\n${fiftyParas.join('\n\n')}`,
+      'TXT'
+    );
+    const customBookB = buildBookFromExtractedText(
+      'Custom Volume Beta',
+      'Author Beta',
+      `Chapter 1: Opening\n\n${fiftyParas.join('\n\n')}\n\nChapter 2: Continuation\n\n${fiftyParas.join('\n\n')}`,
+      'TXT'
+    );
+
+    // 1. Save both books to IndexedDB
+    await saveBooksToIndexedDb([customBookA, customBookB]);
+    const loadedBoth = await loadBooksFromIndexedDb();
+    assert.equal(loadedBoth.length, 2);
+    assert.equal(loadedBoth[0].chapters[0].originalText.length, 50);
+
+    // 2. Remove customBookA via reconciliation (saving only [customBookB])
+    await saveBooksToIndexedDb([customBookB]);
+    const afterReconcile = await loadBooksFromIndexedDb();
+    assert.equal(afterReconcile.length, 1);
+    assert.equal(afterReconcile[0].id, customBookB.id);
+
+    // 3. Explicit deleteBookFromIndexedDb removes customBookB
+    await deleteBookFromIndexedDb(customBookB.id);
+    const afterDelete = await loadBooksFromIndexedDb();
+    assert.equal(afterDelete.length, 0);
+
+    // 4. QuotaExceededError fallback: never truncates chapter paragraphs to 30 in localStorage while pretending completeness;
+    // stores shell in localStorage and full 50-paragraph manuscript in IndexedDB
+    simulateQuotaFailureOnFirstWrite = true;
+    savePersistedAppState({
+      customBooks: [customBookA],
+    });
+
+    const lsState = loadPersistedAppState();
+    assert.equal(lsState.customBooks.length, 1);
+    assert.equal(
+      lsState.customBooks[0].chapters.length,
+      0,
+      'Quota fallback stores shell in localStorage instead of silently truncating to 30 paragraphs'
+    );
+
+    const idbRestored = await loadBooksFromIndexedDb();
+    assert.equal(idbRestored.length, 1);
+    assert.equal(
+      idbRestored[0].chapters[0].originalText.length,
+      50,
+      'Full 50 paragraphs remain intact in IndexedDB'
+    );
+  } finally {
+    configureTestStorageAdapters({ localStorage: null, idbMap: null });
+  }
+});
+
+test('generateSingleTtsChunkWithRetry cancels cleanly on AbortSignal without leaking Object URLs and avoids retrying permanent errors', async () => {
+  clearTtsDeduplicationCache();
+  revokeAllTrackedAudioObjectUrls();
+  assert.equal(getActiveTrackedObjectUrlCount(), 0);
+
+  const chunks = chunkTextForTts(
+    [
+      'This first chapter audio chunk will be cancelled mid-flight when the reader switches chapters or closes the active audiobook workspace.',
+      'This second chapter audio chunk encounters a permanent 400 validation error from the server and must not waste time retrying.',
+    ],
+    180
+  );
+
+  const controller = new AbortController();
+  const slowMockFetch = (async (_url: string, init?: RequestInit) => {
+    // Abort while request is in flight
+    controller.abort();
+    if (init?.signal?.aborted) {
+      const abortErr = new Error('The operation was aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    return new Response(
+      JSON.stringify({ audioBase64: 'AAAA', mimeType: 'audio/pcm' }),
+      { status: 200 }
+    );
+  }) as unknown as typeof fetch;
+
+  const cancelledRes = await generateSingleTtsChunkWithRetry({
+    chunk: chunks[0],
+    voiceName: 'Kore',
+    narratorStylePrompt: 'Warm narrator',
+    maxRetries: 3,
+    baseDelayMs: 50,
+    signal: controller.signal,
+    fetchImpl: slowMockFetch,
+  });
+
+  assert.equal(cancelledRes.status, 'pending');
+  assert.equal(cancelledRes.objectUrl, undefined);
+  assert.equal(
+    getActiveTrackedObjectUrlCount(),
+    0,
+    'Cancelled TTS request must not leak tracked Object URLs'
+  );
+
+  // Permanent 400 error should stop after 1 attempt without retrying
+  let permanentAttempts = 0;
+  const permanentFailFetch = (async () => {
+    permanentAttempts++;
+    return new Response(
+      JSON.stringify({ error: 'EMPTY_TTS_TEXT', message: 'Invalid chunk' }),
+      { status: 400 }
+    );
+  }) as unknown as typeof fetch;
+
+  const permanentRes = await generateSingleTtsChunkWithRetry({
+    chunk: chunks[1],
+    voiceName: 'Kore',
+    narratorStylePrompt: 'Warm narrator',
+    maxRetries: 3,
+    baseDelayMs: 10,
+    fetchImpl: permanentFailFetch,
+  });
+
+  assert.equal(permanentRes.status, 'failed');
+  assert.equal(
+    permanentAttempts,
+    1,
+    'Permanent 4xx TTS error must not waste retries'
+  );
+});
+
+test('validateSummarizeRequest ignores tampered client contentHash and withRetryAndTimeout handles permanent errors & cancellation', async () => {
+  const { buildServerSummaryCacheKey, withRetryAndTimeout } = await import(
+    '../../../backend/src/server'
+  );
+
+  const reqA = validateSummarizeRequest({
+    bookTitle: 'The Odyssey',
+    chapterTitle: 'Book I',
+    contentHash: 'tampered-hash-from-client',
+    originalText: [
+      'Tell me, O Muse, of that ingenious hero who travelled far and wide after he had sacked the famous town of Troy.',
+    ],
+  });
+  const reqB = validateSummarizeRequest({
+    bookTitle: 'The Odyssey',
+    chapterTitle: 'Book I',
+    contentHash: 'tampered-hash-from-client',
+    originalText: [
+      'Now all the other heroes who had escaped destruction at Troy were safe at home and had survived the war and the sea.',
+    ],
+  });
+
+  assert.equal(reqA.valid, true);
+  assert.equal(reqB.valid, true);
+  assert.notEqual(
+    reqA.sanitized?.contentHash,
+    'tampered-hash-from-client',
+    'Server must compute contentHash from actual paragraphs rather than trusting client hash'
+  );
+  assert.notEqual(
+    reqA.sanitized?.contentHash,
+    reqB.sanitized?.contentHash,
+    'Different chapter text must produce distinct server contentHash even if client sends identical contentHash'
+  );
+
+  // Prompt version changes must invalidate both client and server summary cache keys
+  const clientKeyV1 = buildSummaryCacheKey({
+    contentHash: reqA.sanitized!.contentHash,
+    chapterId: 'ch-1',
+    model: 'gemini-3.8-flash',
+    personaId: 'gandalf',
+    detailLevel: 'compact',
+    targetPages: 2,
+    promptVersion: 'v1.0.0',
+  });
+  const clientKeyV2 = buildSummaryCacheKey({
+    contentHash: reqA.sanitized!.contentHash,
+    chapterId: 'ch-1',
+    model: 'gemini-3.8-flash',
+    personaId: 'gandalf',
+    detailLevel: 'compact',
+    targetPages: 2,
+    promptVersion: 'v1.0.1',
+  });
+  assert.notEqual(clientKeyV1, clientKeyV2);
+
+  const serverKeyV1 = buildServerSummaryCacheKey({
+    contentHash: reqA.sanitized!.contentHash,
+    chapterId: 'ch-1',
+    model: 'gemini-3.8-flash',
+    authorPersonaId: 'gandalf',
+    detailLevel: 'compact',
+    targetCompactPages: 2,
+    authorStylePrompt: 'Wise scholar',
+    promptVersion: 'v1.0.0',
+  });
+  const serverKeyV2 = buildServerSummaryCacheKey({
+    contentHash: reqA.sanitized!.contentHash,
+    chapterId: 'ch-1',
+    model: 'gemini-3.8-flash',
+    authorPersonaId: 'gandalf',
+    detailLevel: 'compact',
+    targetCompactPages: 2,
+    authorStylePrompt: 'Wise scholar',
+    promptVersion: 'v1.0.1',
+  });
+  assert.notEqual(serverKeyV1, serverKeyV2);
+
+  // withRetryAndTimeout should not retry permanent 400 errors
+  let attempts = 0;
+  await assert.rejects(
+    async () => {
+      await withRetryAndTimeout(
+        async () => {
+          attempts++;
+          const err = new Error('INVALID_ARGUMENT: bad request') as Error & {
+            status?: number;
+          };
+          err.status = 400;
+          throw err;
+        },
+        { maxRetries: 3, baseDelayMs: 5, timeoutMs: 500 }
+      );
+    },
+    /INVALID_ARGUMENT/
+  );
+  assert.equal(attempts, 1, 'Permanent 400 AI error must not retry');
+});

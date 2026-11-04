@@ -7,6 +7,37 @@ import { GoogleGenAI, Type } from '@google/genai';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+export const SUMMARIZE_PROMPT_VERSION = 'v1.0.1';
+
+export interface AiModelsClient {
+  models: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    generateContent: (params: any) => Promise<{
+      text?: string;
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{
+            inlineData?: {
+              data?: string;
+              mimeType?: string;
+            };
+          }>;
+        };
+      }>;
+    }>;
+  };
+}
+
+export interface CreateAppOptions {
+  aiClient?: AiModelsClient | null;
+  fetchImpl?: typeof fetch;
+  rateLimitMaxPerWindow?: number;
+  rateLimitWindowMs?: number;
+  retryBaseDelayMs?: number;
+  retryTimeoutMs?: number;
+  maxConcurrentAi?: number;
+}
+
 export function getSummarizeModelName(): string {
   return (process.env.GEMINI_SUMMARIZE_MODEL || 'gemini-3.8-flash').trim();
 }
@@ -30,51 +61,137 @@ function getAiClient(): GoogleGenAI | null {
   });
 }
 
-async function fetchWithTimeout(url: string, ms = 6500): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  ms = 6500,
+  fetchImpl: typeof fetch = fetch
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const resp = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
+    const resp = await fetchImpl(url, { signal: controller.signal });
     return resp;
-  } catch (e) {
+  } finally {
     clearTimeout(timer);
-    throw e;
   }
 }
 
-async function withRetryAndTimeout<T>(
-  operation: () => Promise<T>,
-  options: { maxRetries?: number; baseDelayMs?: number; timeoutMs?: number } = {}
+function isPermanentAiError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const status = Number((err as { status?: unknown }).status);
+  if (
+    Number.isFinite(status) &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  ) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : '';
+  if (
+    msg.includes('INVALID_ARGUMENT') ||
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('PERMISSION_DENIED')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export async function withRetryAndTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  options: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  } = {}
 ): Promise<T> {
-  const { maxRetries = 2, baseDelayMs = 450, timeoutMs = 22000 } = options;
+  const {
+    maxRetries = 2,
+    baseDelayMs = 450,
+    timeoutMs = 22000,
+    signal,
+  } = options;
   let attempt = 0;
   let lastError: unknown;
 
   while (attempt <= maxRetries) {
+    if (signal?.aborted) {
+      throw new Error('AI request cancelled by caller');
+    }
+
     attempt++;
+    const attemptController = new AbortController();
+    const onCallerAbort = () => attemptController.abort();
+    signal?.addEventListener('abort', onCallerAbort, { once: true });
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
-        operation(),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`AI request timed out after ${timeoutMs}ms`)),
-            timeoutMs
-          )
-        ),
+        operation(attemptController.signal),
+        new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            attemptController.abort();
+            reject(new Error(`AI request timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        }),
       ]);
       return result;
     } catch (err) {
       lastError = err;
-      if (attempt <= maxRetries) {
-        const backoff = Math.min(3000, baseDelayMs * Math.pow(2, attempt - 1));
-        await new Promise((r) => setTimeout(r, backoff));
+      if (signal?.aborted) {
+        throw new Error('AI request cancelled by caller');
       }
+      if (isPermanentAiError(err) || attempt > maxRetries) {
+        break;
+      }
+      const jitter = Math.floor(Math.random() * 50);
+      const backoff = Math.min(
+        3000,
+        baseDelayMs * Math.pow(2, attempt - 1) + jitter
+      );
+      await new Promise<void>((resolve) => {
+        const backoffTimer = setTimeout(resolve, backoff);
+        signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(backoffTimer);
+            resolve();
+          },
+          { once: true }
+        );
+      });
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+      }
+      signal?.removeEventListener('abort', onCallerAbort);
     }
   }
   throw lastError instanceof Error
     ? lastError
     : new Error('AI operation failed after retries');
+}
+
+function createConcurrencySemaphore(maxConcurrent: number) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  return async function runWithLimit<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
 }
 
 export function computeServerContentHash(input: string): string {
@@ -215,10 +332,8 @@ export function validateSummarizeRequest(body: SummarizeRequestBody): {
     .trim()
     .slice(0, 800);
 
-  const computedHash =
-    typeof body.contentHash === 'string' && body.contentHash.trim().length > 0
-      ? body.contentHash.trim()
-      : computeServerContentHash(rawParas.join('\n\n'));
+  // Always compute contentHash server-side from the sanitized chapter text — never trust client-supplied hashes
+  const computedHash = computeServerContentHash(rawParas.join('\n\n'));
 
   return {
     valid: true,
@@ -367,6 +482,10 @@ const serverSummaryCache = new Map<
   }
 >();
 
+export function clearServerSummaryCache(): void {
+  serverSummaryCache.clear();
+}
+
 export function buildServerSummaryCacheKey(params: {
   contentHash: string;
   chapterId: string;
@@ -375,6 +494,7 @@ export function buildServerSummaryCacheKey(params: {
   detailLevel: string;
   targetCompactPages: number;
   authorStylePrompt: string;
+  promptVersion?: string;
 }): string {
   return computeServerContentHash(
     [
@@ -385,6 +505,7 @@ export function buildServerSummaryCacheKey(params: {
       params.detailLevel,
       String(params.targetCompactPages),
       params.authorStylePrompt,
+      params.promptVersion || SUMMARIZE_PROMPT_VERSION,
     ].join('::')
   );
 }
@@ -396,6 +517,7 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
   number: number;
   title: string;
   originalText: string[];
+  chapterStructure?: 'original_chapters' | 'editorial_sections';
 }> {
   const startMarkerRegex = /\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\n]*\*\*\*/i;
   const endMarkerRegex = /\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK/i;
@@ -414,17 +536,18 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
   if (bodyText.length < 200) return [];
 
   const chapterRegex =
-    /(?:^|\r?\n)[ \t]*(?:CHAPTER|Chapter|BOOK|Book|PART|Part|CANTO|Canto|ACT|Act|LETTER|Letter|SCENE|Scene|STAVE|Stave)\s+(?:[IVXLCDM\d]+|[A-Za-z]+)(?:[:.—-]\s*[^\r\n]+)?/g;
+    /(?:^|\r?\n)[ \t]*(?:CHAPTER|Chapter|BOOK|Book|PART|Part|CANTO|Canto|ACT|Act|LETTER|Letter|SCENE|Scene|STAVE|Stave)[ \t]+(?:[IVXLCDM\d]+|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|ELEVEN|TWELVE|THIRTEEN|FOURTEEN|FIFTEEN|SIXTEEN|SEVENTEEN|EIGHTEEN|NINETEEN|TWENTY|FIRST|SECOND|THIRD|FOURTH|FIFTH|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|First|Second|Third|Fourth|Fifth)\b\.?(?:[ \t]*[:.—-][ \t]*[^\r\n]+)?/g;
   const matches = [...bodyText.matchAll(chapterRegex)];
 
   const extractedChapters: Array<{
     number: number;
     title: string;
     originalText: string[];
+    chapterStructure?: 'original_chapters' | 'editorial_sections';
   }> = [];
 
   if (matches.length >= 2) {
-    for (let i = 0; i < matches.length && extractedChapters.length < 80; i++) {
+    for (let i = 0; i < matches.length; i++) {
       const start = matches[i].index ?? 0;
       const end =
         i + 1 < matches.length
@@ -438,20 +561,20 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
         const paras = slice
           .split(/\r?\n\s*\r?\n/)
           .map((p) => p.replace(/\s+/g, ' ').trim())
-          .filter((p) => p.length > 35)
-          .slice(0, 60); // Preserve up to 60 full paragraphs per chapter instead of truncating at 5
+          .filter((p) => p.length > 35);
         if (paras.length >= 1) {
           extractedChapters.push({
             number: extractedChapters.length + 1,
             title: heading,
             originalText: paras,
+            chapterStructure: 'original_chapters',
           });
         }
       }
     }
   }
 
-  // Fallback for plays, essays, or treatises without "CHAPTER" headings: split into natural sections
+  // Fallback for plays, essays, or treatises without "CHAPTER" headings: split into natural sections without truncating
   if (extractedChapters.length === 0) {
     const allParas = bodyText
       .split(/\r?\n\s*\r?\n/)
@@ -461,7 +584,7 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
     const parasPerSection = 18;
     for (
       let i = 0;
-      i < allParas.length && extractedChapters.length < 40;
+      i < allParas.length;
       i += parasPerSection
     ) {
       const slice = allParas.slice(i, i + parasPerSection);
@@ -470,6 +593,7 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
           number: extractedChapters.length + 1,
           title: `Section ${extractedChapters.length + 1}`,
           originalText: slice,
+          chapterStructure: 'editorial_sections',
         });
       }
     }
@@ -478,8 +602,53 @@ export function parseGutenbergPlainTextChapters(rawText: string): Array<{
   return extractedChapters;
 }
 
-export function createApp() {
+export function createApp(options: CreateAppOptions = {}) {
   const app = express();
+  const fetchFn = options.fetchImpl || fetch;
+  const resolveAi = (): AiModelsClient | null =>
+    options.aiClient !== undefined ? options.aiClient : getAiClient();
+  const retryBaseDelayMs = options.retryBaseDelayMs ?? 450;
+  const retryTimeoutMs = options.retryTimeoutMs ?? 22000;
+  const runAiLimited = createConcurrencySemaphore(options.maxConcurrentAi ?? 4);
+
+  // Sliding-window rate limiter for AI endpoints
+  const rateLimitMax = options.rateLimitMaxPerWindow ?? 60;
+  const rateLimitWindowMs = options.rateLimitWindowMs ?? 60_000;
+  const ipRequestTimestamps = new Map<string, number[]>();
+
+  const aiRateLimitMiddleware: express.RequestHandler = (req, res, next) => {
+    const ip =
+      String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local')
+        .split(',')[0]
+        .trim() || 'local';
+    const now = Date.now();
+    const recent = (ipRequestTimestamps.get(ip) || []).filter(
+      (t) => now - t < rateLimitWindowMs
+    );
+    if (recent.length >= rateLimitMax) {
+      res.status(429).json({
+        error: 'RATE_LIMIT_EXCEEDED',
+        status: 'failed',
+        message: 'Too many AI requests. Please wait a moment and try again.',
+      });
+      return;
+    }
+    recent.push(now);
+    ipRequestTimestamps.set(ip, recent);
+    next();
+  };
+
+  // Safe CORS headers
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   app.use(express.json({ limit: '15mb' }));
 
@@ -487,12 +656,13 @@ export function createApp() {
     res.json({
       status: 'ok',
       service: 'the-readers-club',
+      version: '1.0.1',
       timestamp: new Date().toISOString(),
     });
   });
 
   // 1. Per-Chapter On-Demand AI Summarization Pipeline (with Chunking, Caching, Validation & Retries)
-  app.post('/api/summarize', async (req, res) => {
+  app.post('/api/summarize', aiRateLimitMiddleware, async (req, res) => {
     const validation = validateSummarizeRequest(req.body);
     if (!validation.valid || !validation.sanitized) {
       return res.status(400).json({
@@ -527,6 +697,7 @@ export function createApp() {
       detailLevel,
       targetCompactPages,
       authorStylePrompt,
+      promptVersion: SUMMARIZE_PROMPT_VERSION,
     });
 
     const cached = serverSummaryCache.get(cacheKey);
@@ -541,7 +712,7 @@ export function createApp() {
       });
     }
 
-    const ai = getAiClient();
+    const ai = resolveAi();
     if (!ai) {
       return res.status(503).json({
         error: 'GEMINI_API_KEY_NOT_CONFIGURED',
@@ -553,6 +724,14 @@ export function createApp() {
 
     try {
       const chunks = splitServerTextIntoChunks(paragraphs, 5500);
+      if (chunks.length > 24) {
+        return res.status(422).json({
+          error: 'CHAPTER_EXCEEDS_MAX_CHUNKS',
+          status: 'failed',
+          message: `Chapter contains ${chunks.length} segments (exceeding the 24-segment safety limit). Split the manuscript into smaller chapters so it can be summarized completely without truncation.`,
+        });
+      }
+
       const sourceCharCount = paragraphs.join('\n\n').length;
 
       const targetParagraphCount =
@@ -564,7 +743,7 @@ export function createApp() {
         passageText: string,
         chunkLabel: string
       ): Promise<{ compactText: string[]; bulletPoints: string[] }> => {
-        const prompt = `You are "${authorPersonaName}" acting as the literary chapter summarizer for The Readers Club.
+        const prompt = `You are "${authorPersonaName}" acting as the literary chapter summarizer for The Readers Club (Prompt ${SUMMARIZE_PROMPT_VERSION}).
 Style instruction: ${authorStylePrompt}
 
 Book: "${bookTitle}"
@@ -580,45 +759,51 @@ STRICT FACTUAL INTEGRITY RULES:
 Source Passage:
 ${passageText}`;
 
-        return withRetryAndTimeout(
-          async () => {
-            const response = await ai.models.generateContent({
-              model: modelName,
-              contents: prompt,
-              config: {
-                systemInstruction:
-                  'You are a factually rigorous, chapter-by-chapter literary summarizer. Never invent facts outside the provided text. Return valid JSON matching the schema.',
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    compactText: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
+        return runAiLimited(() =>
+          withRetryAndTimeout(
+            async () => {
+              const response = await ai.models.generateContent({
+                model: modelName,
+                contents: prompt,
+                config: {
+                  systemInstruction:
+                    'You are a factually rigorous, chapter-by-chapter literary summarizer. Never invent facts outside the provided text. Return valid JSON matching the schema.',
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      compactText: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      bulletPoints: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
                     },
-                    bulletPoints: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
+                    required: ['compactText', 'bulletPoints'],
                   },
-                  required: ['compactText', 'bulletPoints'],
                 },
-              },
-            });
+              });
 
-            const parsed = JSON.parse((response.text ?? '{}').trim());
-            const validated = validateSummarizeApiResponse(parsed);
-            if (!validated.valid) {
-              throw new Error(
-                'Model returned malformed or empty summary arrays.'
-              );
+              const parsed = JSON.parse((response.text ?? '{}').trim());
+              const validated = validateSummarizeApiResponse(parsed);
+              if (!validated.valid) {
+                throw new Error(
+                  'Model returned malformed or empty summary arrays.'
+                );
+              }
+              return {
+                compactText: validated.compactText,
+                bulletPoints: validated.bulletPoints,
+              };
+            },
+            {
+              maxRetries: 2,
+              baseDelayMs: retryBaseDelayMs,
+              timeoutMs: retryTimeoutMs,
             }
-            return {
-              compactText: validated.compactText,
-              bulletPoints: validated.bulletPoints,
-            };
-          },
-          { maxRetries: 2, baseDelayMs: 450, timeoutMs: 22000 }
+          )
         );
       };
 
@@ -633,7 +818,7 @@ ${passageText}`;
         finalCompactText = singleRes.compactText;
         finalBulletPoints = singleRes.bulletPoints;
       } else {
-        // Multi-chunk map-reduce pipeline for long chapters
+        // Multi-chunk map-reduce pipeline for long chapters — summarizes ALL chunks without .slice(0, 6) truncation
         const chunkSummaries: Array<{
           chunkIndex: number;
           paragraphRange: [number, number];
@@ -641,10 +826,10 @@ ${passageText}`;
           bulletPoints: string[];
         }> = [];
 
-        for (const chunk of chunks.slice(0, 6)) {
+        for (const chunk of chunks) {
           const partRes = await summarizeSinglePassage(
             chunk.text,
-            `Part ${chunk.index + 1} of ${Math.min(chunks.length, 6)} (Paragraphs ${chunk.paragraphRange[0] + 1}–${chunk.paragraphRange[1] + 1})`
+            `Part ${chunk.index + 1} of ${chunks.length} (Paragraphs ${chunk.paragraphRange[0] + 1}–${chunk.paragraphRange[1] + 1})`
           );
           chunkSummaries.push({
             chunkIndex: chunk.index,
@@ -707,7 +892,7 @@ ${passageText}`;
   });
 
   // 2. Long-Form Chunked TTS Audiobook Endpoint
-  app.post('/api/tts', async (req, res) => {
+  app.post('/api/tts', aiRateLimitMiddleware, async (req, res) => {
     try {
       const { text, voiceName, narratorStylePrompt } = req.body || {};
       const cleanText = String(text || '').trim();
@@ -725,7 +910,7 @@ ${passageText}`;
         });
       }
 
-      const ai = getAiClient();
+      const ai = resolveAi();
       if (!ai) {
         return res.status(503).json({
           error: 'GEMINI_API_KEY_NOT_CONFIGURED',
@@ -742,35 +927,41 @@ ${passageText}`;
 
       const ttsModel = getTtsModelName();
 
-      const response = await withRetryAndTimeout(
-        async () =>
-          ai.models.generateContent({
-            model: ttsModel,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: cleanText,
-                    speechMetadata: {
-                      style:
-                        narratorStylePrompt ||
-                        'Expressive, engaging literary audiobook narrator',
+      const response = await runAiLimited(() =>
+        withRetryAndTimeout(
+          async () =>
+            ai.models.generateContent({
+              model: ttsModel,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: cleanText,
+                      speechMetadata: {
+                        style:
+                          narratorStylePrompt ||
+                          'Expressive, engaging literary audiobook narrator',
+                      },
                     },
+                  ],
+                },
+              ],
+              config: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: selectedVoice },
                   },
-                ],
-              },
-            ],
-            config: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: selectedVoice },
                 },
               },
-            },
-          }),
-        { maxRetries: 2, baseDelayMs: 400, timeoutMs: 20000 }
+            }),
+          {
+            maxRetries: 2,
+            baseDelayMs: retryBaseDelayMs,
+            timeoutMs: retryTimeoutMs,
+          }
+        )
       );
 
       const inlineData =
@@ -785,6 +976,7 @@ ${passageText}`;
       }
 
       return res.json({
+        status: 'ready',
         audioBase64: base64Audio,
         mimeType: inlineData?.mimeType || 'audio/wav',
         model: ttsModel,
@@ -817,7 +1009,11 @@ ${passageText}`;
       coverUrl: string;
       description: string;
       sourceApi: 'gutendex' | 'google_books';
-      availabilityStatus: 'full_text' | 'preview' | 'metadata_only';
+      availabilityStatus:
+        | 'full_text'
+        | 'external_source_available'
+        | 'preview'
+        | 'metadata_only';
       sourceAttribution: string;
       pageCount?: number;
     }> = [];
@@ -830,7 +1026,7 @@ ${passageText}`;
         params.set('page', String(page));
 
         const gutendexUrl = `https://gutendex.com/books?${params.toString()}`;
-        const r = await fetchWithTimeout(gutendexUrl, 5000);
+        const r = await fetchWithTimeout(gutendexUrl, 5000, fetchFn);
         if (!r.ok) return;
         const data = (await r.json()) as {
           count?: number;
@@ -898,7 +1094,9 @@ ${passageText}`;
               summaryList[0] ||
               `${item.title} by ${formattedAuthor}. Public-domain edition indexed via Project Gutenberg (#${item.id}).`,
             sourceApi: 'gutendex',
-            availabilityStatus: hasPlainText ? 'full_text' : 'metadata_only',
+            availabilityStatus: hasPlainText
+              ? 'external_source_available'
+              : 'metadata_only',
             sourceAttribution: `Project Gutenberg Public Domain Archive (eBook #${item.id})`,
           });
         }
@@ -910,7 +1108,7 @@ ${passageText}`;
         const gbUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(
           searchTerm
         )}&startIndex=${startIndex}&maxResults=12&printType=books`;
-        const r = await fetchWithTimeout(gbUrl, 5000);
+        const r = await fetchWithTimeout(gbUrl, 5000, fetchFn);
         if (!r.ok) return;
         const data = (await r.json()) as {
           totalItems?: number;
@@ -996,7 +1194,7 @@ ${passageText}`;
 
       for (const url of candidateUrls) {
         try {
-          const r = await fetchWithTimeout(url, 6500);
+          const r = await fetchWithTimeout(url, 6500, fetchFn);
           if (r.ok) {
             const text = await r.text();
             if (text && text.length > 500) {
@@ -1027,9 +1225,14 @@ ${passageText}`;
         });
       }
 
+      const chapterStructure =
+        extractedChapters[0]?.chapterStructure || 'original_chapters';
+
       return res.json({
         gutenbergId,
         availabilityStatus: 'full_text',
+        chapterStructure,
+        verifiedChapterCount: extractedChapters.length,
         sourceAttribution: `Project Gutenberg Public Domain Text (${resolvedUrl})`,
         chapters: extractedChapters,
       });
@@ -1043,7 +1246,7 @@ ${passageText}`;
   });
 
   // 5. Mascot Multi-Turn Literary Companion Chatbot Endpoint
-  app.post('/api/mascot/chat', async (req, res) => {
+  app.post('/api/mascot/chat', aiRateLimitMiddleware, async (req, res) => {
     const validation = validateMascotChatRequest(req.body);
     if (!validation.valid || !validation.sanitized) {
       return res.status(400).json({
@@ -1052,7 +1255,7 @@ ${passageText}`;
       });
     }
 
-    const ai = getAiClient();
+    const ai = resolveAi();
     if (!ai) {
       return res.status(503).json({
         error: 'GEMINI_API_KEY_NOT_CONFIGURED',
@@ -1094,16 +1297,22 @@ Rules:
         },
       ];
 
-      const response = await withRetryAndTimeout(
-        async () =>
-          ai.models.generateContent({
-            model: modelName,
-            contents,
-            config: {
-              systemInstruction,
-            },
-          }),
-        { maxRetries: 2, baseDelayMs: 400, timeoutMs: 25000 }
+      const response = await runAiLimited(() =>
+        withRetryAndTimeout(
+          async () =>
+            ai.models.generateContent({
+              model: modelName,
+              contents,
+              config: {
+                systemInstruction,
+              },
+            }),
+          {
+            maxRetries: 2,
+            baseDelayMs: retryBaseDelayMs,
+            timeoutMs: retryTimeoutMs,
+          }
+        )
       );
 
       const replyText = (response.text ?? '').trim();
@@ -1168,12 +1377,20 @@ export async function startServer() {
 
   const listenPort = Number(process.env.PORT) || PORT;
   return new Promise<void>((resolve) => {
-    app.listen(listenPort, '0.0.0.0', () => {
+    const httpServer = app.listen(listenPort, '0.0.0.0', () => {
       console.log(
         `The Readers Club server listening on http://0.0.0.0:${listenPort}`
       );
       resolve();
     });
+
+    const shutdown = () => {
+      httpServer.close(() => {
+        process.exit(0);
+      });
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
   });
 }
 

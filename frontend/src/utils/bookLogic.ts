@@ -102,8 +102,10 @@ export function computeContentHash(input: string): string {
   return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
 
+export const SUMMARIZE_PROMPT_VERSION = 'v1.0.1';
+
 /**
- * Computes a deterministic cache key for chapter summaries based on content hash, chapter ID, model, persona, and detail configuration.
+ * Computes a deterministic cache key for chapter summaries based on content hash, chapter ID, model, persona, prompt version, and detail configuration.
  */
 export function buildSummaryCacheKey(params: {
   contentHash: string;
@@ -113,6 +115,7 @@ export function buildSummaryCacheKey(params: {
   detailLevel: SummaryDetailLevel;
   targetPages: number;
   customTrait?: string;
+  promptVersion?: string;
 }): string {
   const raw = [
     params.contentHash,
@@ -122,6 +125,7 @@ export function buildSummaryCacheKey(params: {
     params.detailLevel,
     String(params.targetPages),
     (params.customTrait || '').trim().toLowerCase(),
+    params.promptVersion || SUMMARIZE_PROMPT_VERSION,
   ].join('::');
   return `sum-${computeContentHash(raw)}`;
 }
@@ -450,7 +454,18 @@ export function buildBookFromExtractedText(
     pageEnd?: number;
   }> = [];
 
+  let chapterStructure: 'original_chapters' | 'editorial_sections' =
+    'original_chapters';
+
   if (structuredChapters && structuredChapters.length > 0) {
+    const allGenericSections = structuredChapters.every((ch) =>
+      /^(?:Section \d+|Chapter \d+ \(Pages|Chapter 1: Complete Text|Chapter \d+$)/i.test(
+        ch.title.trim()
+      )
+    );
+    if (allGenericSections) {
+      chapterStructure = 'editorial_sections';
+    }
     for (const ch of structuredChapters) {
       const validParas = ch.paragraphs
         .map((p) => p.replace(/\s+/g, ' ').trim())
@@ -470,7 +485,8 @@ export function buildBookFromExtractedText(
     const matches = [...cleaned.matchAll(chapterRegex)];
 
     if (matches.length >= 2) {
-      for (let i = 0; i < matches.length && i < 120; i++) {
+      // Preserve ALL detected chapters without arbitrary 120-chapter truncation
+      for (let i = 0; i < matches.length; i++) {
         const start = matches[i].index ?? 0;
         const end =
           i + 1 < matches.length
@@ -491,6 +507,7 @@ export function buildBookFromExtractedText(
     }
 
     if (rawChunks.length === 0) {
+      chapterStructure = 'editorial_sections';
       const paragraphs = cleaned
         .split(/\n\s*\n/)
         .map((p) => p.replace(/\s+/g, ' ').trim())
@@ -616,8 +633,15 @@ export function buildBookFromExtractedText(
       }`
   );
 
+  const titleSlug =
+    (title || 'book')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 32) || 'book';
+
   return {
-    id: `uploaded-${Date.now()}`,
+    id: `uploaded-${titleSlug}-${contentHash.replace('fnv1a-', '')}-${Date.now()}`,
     title: title || 'Uploaded Club Manuscript',
     author: author || 'Independent Author',
     year: new Date().getFullYear().toString(),
@@ -625,7 +649,11 @@ export function buildBookFromExtractedText(
     isPreCompressed: preCompress,
     sourceType: 'uploaded',
     availabilityStatus: 'full_text',
-    sourceAttribution: `Local ${fileFormat} Upload (${chapters.length} verified section${chapters.length === 1 ? '' : 's'})`,
+    chapterStructure,
+    verifiedChapterCount: chapters.length,
+    sourceAttribution: `Local ${fileFormat} Upload (${chapters.length} verified ${
+      chapterStructure === 'editorial_sections' ? 'editorial section' : 'chapter'
+    }${chapters.length === 1 ? '' : 's'})`,
     contentHash,
     fileFormat,
     coverColor: '#0047FF',
@@ -681,10 +709,12 @@ export function buildBookFromExternalCatalogItem(
       : `Catalog entry for ${item.title} by ${item.author}.`;
 
   // Determine genuine content availability status
-  let availabilityStatus: ContentAvailabilityStatus = item.availabilityStatus || 'metadata_only';
+  // Note: Unhydrated Project Gutenberg references are marked 'external_source_available' until their chapters are actually fetched and parsed.
+  let availabilityStatus: ContentAvailabilityStatus =
+    item.availabilityStatus || 'metadata_only';
   if (!item.availabilityStatus) {
     if (srcApi === 'gutendex' && item.gutenbergId) {
-      availabilityStatus = 'full_text';
+      availabilityStatus = 'external_source_available';
     } else if (item.previewText && item.previewText.length > 0) {
       availabilityStatus = 'preview';
     } else {
@@ -695,15 +725,22 @@ export function buildBookFromExternalCatalogItem(
   const sourceAttribution =
     item.sourceAttribution ||
     (srcApi === 'gutendex' && item.gutenbergId
-      ? `Project Gutenberg Public Domain Archive (eBook #${item.gutenbergId})`
+      ? `Project Gutenberg Public Domain Archive (eBook #${item.gutenbergId} — External Hydration Available)`
       : availabilityStatus === 'preview'
       ? 'Google Books Publisher Preview (Partial Text Only)'
       : 'Google Books Discovery Catalog (Metadata Only — Full Manuscript Copyrighted / Unavailable)');
 
   // Only populate chapters if actual preview text was explicitly provided; NEVER fabricate chapters from description!
   const chapters: BookChapter[] = [];
-  if (availabilityStatus === 'preview' && item.previewText && item.previewText.length > 0) {
-    const previewPages = Math.max(1, Math.round(item.previewText.join(' ').split(/\s+/).length / 250));
+  if (
+    availabilityStatus === 'preview' &&
+    item.previewText &&
+    item.previewText.length > 0
+  ) {
+    const previewPages = Math.max(
+      1,
+      Math.round(item.previewText.join(' ').split(/\s+/).length / 250)
+    );
     chapters.push({
       id: `${item.id}-preview-1`,
       number: 1,
@@ -718,9 +755,12 @@ export function buildBookFromExternalCatalogItem(
     });
   }
 
-  const estimatedTotalPages = item.pageCount && item.pageCount > 0 ? item.pageCount : 0;
+  const estimatedTotalPages =
+    item.pageCount && item.pageCount > 0 ? item.pageCount : 0;
   const estimatedCompactPages =
-    estimatedTotalPages > 0 ? Math.max(1, Math.round(estimatedTotalPages * 0.175)) : 0;
+    estimatedTotalPages > 0
+      ? Math.max(1, Math.round(estimatedTotalPages * 0.175))
+      : 0;
 
   return {
     id: item.id,
@@ -730,12 +770,16 @@ export function buildBookFromExternalCatalogItem(
     year: item.year || 'Catalog Edition',
     genre: item.genre || 'Literary Archive',
     subgenres: item.subgenres || [item.genre],
-    mlTags: item.mlTags || [item.genre.toLowerCase(), item.author.toLowerCase()],
+    mlTags:
+      item.mlTags || [item.genre.toLowerCase(), item.author.toLowerCase()],
     trendingScore: item.trendingScore || 85,
     isFeatured: item.isFeatured || false,
     isPreCompressed: false,
     sourceType: srcApi === 'google_books' ? 'google_books' : 'gutendex',
     availabilityStatus,
+    chapterStructure: chapters.length > 0 ? 'editorial_sections' : 'unparsed',
+    verifiedChapterCount: chapters.length,
+    estimatedChapterCount: item.chapterCount,
     sourceAttribution,
     fileFormat: srcApi === 'gutendex' ? 'GUTENDEX' : 'GOOGLE BOOKS',
     coverUrl: item.coverUrl,
@@ -757,7 +801,16 @@ export function buildBookFromExternalCatalogItem(
       coreTakeaways: [
         `Author: ${item.author}`,
         `Genre: ${item.genre}`,
-        `Availability: ${availabilityStatus === 'full_text' ? 'Full Public-Domain Text via Project Gutenberg' : availabilityStatus === 'preview' ? 'Publisher Preview Excerpt' : 'Catalog Metadata Only'}`,
+        `Availability: ${
+          availabilityStatus === 'full_text' ||
+          availabilityStatus === 'full_text_available'
+            ? 'Full Public-Domain Text Loaded'
+            : availabilityStatus === 'external_source_available'
+            ? 'External Public-Domain Source Available via Project Gutenberg'
+            : availabilityStatus === 'preview'
+            ? 'Publisher Preview Excerpt'
+            : 'Catalog Metadata Only'
+        }`,
       ],
     },
     masterBookBullets: [],
@@ -823,15 +876,26 @@ export function hydrateBookWithGutenbergChapters(
       }...`
   );
 
+  const isEditorialFallback = chapters.every((c) =>
+    /^Section \d+$/i.test(c.title.trim())
+  );
+
   return {
     ...book,
+    isPreCompressed: false,
     availabilityStatus: 'full_text',
+    chapterStructure: isEditorialFallback
+      ? 'editorial_sections'
+      : 'original_chapters',
+    verifiedChapterCount: chapters.length,
     contentHash,
     originalTotalPages: allocation.totalOriginal,
     compactTotalPages: allocation.totalCompact,
     superShortPages: Math.min(4, Math.max(2, Math.ceil(chapters.length / 6))),
     superShortExecutiveSummary: {
-      thesis: `${book.title} by ${book.author} spans ${chapters.length} verified chapters (${allocation.totalOriginal}p original manuscript → ${allocation.totalCompact}p compact target) retrieved directly from Project Gutenberg.`,
+      thesis: `${book.title} by ${book.author} spans ${chapters.length} verified ${
+        isEditorialFallback ? 'sections' : 'chapters'
+      } (${allocation.totalOriginal}p original manuscript → ${allocation.totalCompact}p compact target) retrieved directly from Project Gutenberg.`,
       executivePages: chapters.slice(0, 3).map(
         (ch, idx) =>
           `Movement ${idx + 1} (${ch.title}): ${ch.originalText[0]?.slice(0, 260) || ''}`

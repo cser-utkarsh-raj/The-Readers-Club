@@ -15,6 +15,7 @@ export interface FileExtractionResult {
   text: string;
   detectedFormat: 'EPUB' | 'PDF' | 'TXT';
   availabilityStatus: ContentAvailabilityStatus;
+  chapterStructure?: 'original_chapters' | 'editorial_sections' | 'unparsed';
   sourceAttribution: string;
   extractedTitle?: string;
   extractedAuthor?: string;
@@ -409,6 +410,7 @@ export async function parseEpubBuffer(
     text: combinedText,
     detectedFormat: 'EPUB',
     availabilityStatus: 'full_text',
+    chapterStructure: 'original_chapters',
     sourceAttribution: `Uploaded EPUB (${fileName}) · ${chapters.length} Spine Chapters`,
     extractedTitle,
     extractedAuthor,
@@ -607,10 +609,23 @@ export async function parsePdfBuffer(
     });
   }
 
-  // If no explicit Chapter headings were in a multi-page PDF, group every ~5 pages cleanly
+  // If no explicit Chapter headings were in a multi-page PDF, group every ~5 pages cleanly as editorial sections
+  let chapterStructure: 'original_chapters' | 'editorial_sections' =
+    chapters.length > 1 ||
+    (chapters.length === 1 &&
+      chapters[0].title !== 'Chapter 1: Opening Pages')
+      ? 'original_chapters'
+      : 'editorial_sections';
+
   if (chapters.length === 1 && pageTexts.length >= 6) {
+    chapterStructure = 'editorial_sections';
     const pagedChapters: ExtractedChapterSection[] = [];
-    const pagesPerSection = Math.max(3, Math.ceil(pageTexts.length / Math.min(12, Math.ceil(pageTexts.length / 4))));
+    const pagesPerSection = Math.max(
+      3,
+      Math.ceil(
+        pageTexts.length / Math.min(12, Math.ceil(pageTexts.length / 4))
+      )
+    );
     for (let i = 0; i < pageTexts.length; i += pagesPerSection) {
       const slice = pageTexts.slice(i, i + pagesPerSection);
       const paras = slice.flatMap((s) => s.paragraphs).filter(Boolean);
@@ -620,9 +635,10 @@ export async function parsePdfBuffer(
       const num = pagedChapters.length + 1;
       pagedChapters.push({
         number: num,
-        title: `Chapter ${num} (Pages ${pStart}–${pEnd})`,
+        title: `Section ${num} (Pages ${pStart}–${pEnd})`,
         paragraphs: paras,
-        pageRangeLabel: pStart === pEnd ? `Page ${pStart}` : `Pages ${pStart}–${pEnd}`,
+        pageRangeLabel:
+          pStart === pEnd ? `Page ${pStart}` : `Pages ${pStart}–${pEnd}`,
         estimatedPages: Math.max(1, pEnd - pStart + 1),
       });
     }
@@ -639,6 +655,7 @@ export async function parsePdfBuffer(
     text: combinedText,
     detectedFormat: 'PDF',
     availabilityStatus: 'full_text',
+    chapterStructure,
     sourceAttribution: `Uploaded PDF (${fileName} · ${numPages} page${numPages === 1 ? '' : 's'})`,
     pageCount: numPages,
     chapters,
@@ -715,7 +732,11 @@ export function parseTextBuffer(
     }
   }
 
+  let chapterStructure: 'original_chapters' | 'editorial_sections' =
+    'original_chapters';
+
   if (chapters.length === 0) {
+    chapterStructure = 'editorial_sections';
     const allParas = decoded
       .split(/\n\s*\n/)
       .map((p) => p.replace(/\s+/g, ' ').trim())
@@ -725,19 +746,24 @@ export function parseTextBuffer(
       const words = allParas.join(' ').split(/\s+/).length;
       chapters.push({
         number: 1,
-        title: 'Chapter 1: Complete Text',
+        title: 'Section 1: Complete Text',
         paragraphs: allParas,
         estimatedPages: Math.max(1, Math.round(words / 250)),
       });
     } else {
-      const parasPerSection = Math.max(4, Math.ceil(allParas.length / Math.min(18, Math.ceil(allParas.length / 4))));
+      const parasPerSection = Math.max(
+        4,
+        Math.ceil(
+          allParas.length / Math.min(18, Math.ceil(allParas.length / 4))
+        )
+      );
       for (let i = 0; i < allParas.length; i += parasPerSection) {
         const slice = allParas.slice(i, i + parasPerSection);
         const num = chapters.length + 1;
         const words = slice.join(' ').split(/\s+/).length;
         chapters.push({
           number: num,
-          title: `Chapter ${num}`,
+          title: `Section ${num}`,
           paragraphs: slice,
           estimatedPages: Math.max(1, Math.round(words / 250)),
         });
@@ -749,6 +775,7 @@ export function parseTextBuffer(
     text: decoded,
     detectedFormat: 'TXT',
     availabilityStatus: 'full_text',
+    chapterStructure,
     sourceAttribution: `Uploaded Text (${fileName})`,
     chapters,
   };

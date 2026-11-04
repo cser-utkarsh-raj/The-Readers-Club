@@ -272,27 +272,52 @@ export function getActiveTrackedObjectUrlCount(): number {
   return activeObjectUrls.size;
 }
 
-/**
- * Generates a single TTS chunk with bounded exponential backoff retries and deduplication.
- * If one chunk fails, only that chunk is marked `failed` and can be retried individually without
- * discarding already-generated chunks.
- */
-export async function generateSingleTtsChunkWithRetry(params: {
+export interface GenerateTtsChunkOptions {
   chunk: TtsAudioChunk;
   voiceName: string;
   narratorStylePrompt: string;
   maxRetries?: number;
   baseDelayMs?: number;
+  signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-}): Promise<TtsAudioChunk> {
+}
+
+function isPermanentTtsError(status: number, errorCode?: string): boolean {
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    return true;
+  }
+  if (errorCode === 'GEMINI_API_KEY_NOT_CONFIGURED') {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Generates a single TTS chunk with bounded exponential backoff retries, jitter, cancellation support,
+ * and deduplication.
+ * If one chunk fails, only that chunk is marked `failed` and can be retried individually without
+ * discarding already-generated chunks.
+ */
+export async function generateSingleTtsChunkWithRetry(
+  params: GenerateTtsChunkOptions
+): Promise<TtsAudioChunk> {
   const {
     chunk,
     voiceName,
     narratorStylePrompt,
     maxRetries = 2,
     baseDelayMs = 300,
+    signal,
     fetchImpl = fetch,
   } = params;
+
+  if (signal?.aborted) {
+    return {
+      ...chunk,
+      status: 'pending',
+      errorMessage: 'TTS request cancelled',
+    };
+  }
 
   const cacheKey = buildTtsChunkCacheKey(
     chunk.text,
@@ -302,6 +327,13 @@ export async function generateSingleTtsChunkWithRetry(params: {
 
   const cached = completedTtsAudioCache.get(cacheKey);
   if (cached) {
+    if (signal?.aborted) {
+      return {
+        ...chunk,
+        status: 'pending',
+        errorMessage: 'TTS request cancelled',
+      };
+    }
     const blob = base64AudioToPlayableBlob(cached.audioBase64, cached.mimeType);
     const objectUrl = createTrackedAudioObjectUrl(blob);
     return {
@@ -317,7 +349,17 @@ export async function generateSingleTtsChunkWithRetry(params: {
   let lastError = 'TTS generation failed';
 
   while (attempt <= maxRetries) {
+    if (signal?.aborted) {
+      return {
+        ...chunk,
+        status: 'pending',
+        errorMessage: 'TTS request cancelled',
+      };
+    }
+
     attempt++;
+    let permanentFailure = false;
+
     try {
       let requestPromise = inFlightTtsRequests.get(cacheKey);
       if (!requestPromise) {
@@ -330,15 +372,19 @@ export async function generateSingleTtsChunkWithRetry(params: {
               voiceName,
               narratorStylePrompt,
             }),
+            signal,
           });
           if (!resp.ok) {
             const errBody = (await resp.json().catch(() => ({}))) as {
               error?: string;
               message?: string;
             };
-            throw new Error(
+            const err = new Error(
               errBody.message || errBody.error || `HTTP ${resp.status}`
-            );
+            ) as Error & { status?: number; code?: string };
+            err.status = resp.status;
+            err.code = errBody.error;
+            throw err;
           }
           const data = (await resp.json()) as {
             audioBase64?: string;
@@ -357,10 +403,31 @@ export async function generateSingleTtsChunkWithRetry(params: {
 
       const result = await requestPromise;
       inFlightTtsRequests.delete(cacheKey);
+
+      if (signal?.aborted) {
+        return {
+          ...chunk,
+          status: 'pending',
+          errorMessage: 'TTS request cancelled',
+        };
+      }
+
       completedTtsAudioCache.set(cacheKey, result);
 
-      const blob = base64AudioToPlayableBlob(result.audioBase64, result.mimeType);
+      const blob = base64AudioToPlayableBlob(
+        result.audioBase64,
+        result.mimeType
+      );
       const objectUrl = createTrackedAudioObjectUrl(blob);
+
+      if (signal?.aborted) {
+        revokeTrackedAudioObjectUrl(objectUrl);
+        return {
+          ...chunk,
+          status: 'pending',
+          errorMessage: 'TTS request cancelled',
+        };
+      }
 
       return {
         ...chunk,
@@ -372,12 +439,56 @@ export async function generateSingleTtsChunkWithRetry(params: {
       };
     } catch (err: unknown) {
       inFlightTtsRequests.delete(cacheKey);
-      lastError = err instanceof Error ? err.message : 'TTS request failed';
-      if (attempt <= maxRetries) {
-        const delay = Math.min(2500, baseDelayMs * Math.pow(2, attempt - 1));
-        await new Promise((resolve) => setTimeout(resolve, delay));
+
+      if (
+        signal?.aborted ||
+        (err instanceof Error && err.name === 'AbortError')
+      ) {
+        return {
+          ...chunk,
+          status: 'pending',
+          errorMessage: 'TTS request cancelled',
+        };
       }
+
+      const status = (err as { status?: number })?.status ?? 0;
+      const code = (err as { code?: string })?.code;
+      if (isPermanentTtsError(status, code)) {
+        permanentFailure = true;
+      }
+
+      lastError = err instanceof Error ? err.message : 'TTS request failed';
+      if (permanentFailure || attempt > maxRetries) {
+        break;
+      }
+
+      const jitter = Math.floor(Math.random() * 60);
+      const delay = Math.min(
+        2500,
+        baseDelayMs * Math.pow(2, attempt - 1) + jitter
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        if (signal) {
+          signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true }
+          );
+        }
+      });
     }
+  }
+
+  if (signal?.aborted) {
+    return {
+      ...chunk,
+      status: 'pending',
+      errorMessage: 'TTS request cancelled',
+    };
   }
 
   return {

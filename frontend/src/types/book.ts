@@ -23,14 +23,23 @@ export type AppPageRoute =
   | 'voices';
 
 /**
- * Explicit source & content availability states (Section 1: Content Integrity)
+ * Explicit source & content availability states (Content Integrity V1.0.1)
  */
 export type ContentAvailabilityStatus =
   | 'full_text'
+  | 'full_text_available'
+  | 'external_source_available'
+  | 'condensed_edition'
+  | 'user_uploaded'
   | 'preview'
   | 'metadata_only'
   | 'extraction_failed'
   | 'unsupported_format';
+
+export type ChapterStructureType =
+  | 'original_chapters'
+  | 'editorial_sections'
+  | 'unparsed';
 
 /**
  * Explicit AI summary generation states (Section 2: AI Summarization Engine)
@@ -141,6 +150,9 @@ export interface BookItem {
   sourceType: 'open_source' | 'uploaded' | 'gutendex' | 'google_books';
   fileFormat?: 'EPUB' | 'PDF' | 'TXT' | 'ARCHIVE' | 'GUTENDEX' | 'GOOGLE BOOKS';
   availabilityStatus?: ContentAvailabilityStatus;
+  chapterStructure?: ChapterStructureType;
+  verifiedChapterCount?: number;
+  estimatedChapterCount?: number;
   sourceAttribution?: string;
   extractionWarning?: string;
   extractionError?: string;
@@ -173,6 +185,9 @@ export interface ExternalCatalogBook {
   trendingScore?: number;
   isFeatured?: boolean;
   chapterCount?: number;
+  verifiedChapterCount?: number;
+  estimatedChapterCount?: number;
+  chapterStructure?: ChapterStructureType;
   chapterTitles?: string[];
   source?: 'gutendex' | 'google_books' | 'open_library';
   sourceApi?: 'gutendex' | 'google_books' | 'open_library';

@@ -17,9 +17,10 @@ function pgCover(id: number): string {
 }
 
 /**
- * 100+ Uncompressed Global Archive Volumes with verified Project Gutenberg cover posters,
- * authentic chapter counts (14 to 36 chapters — never pre-compressed or collapsed to 3 chapters),
- * ML feature tags, and Netflix-style trending/featured metadata.
+ * 104 Public-Domain Global Archive Catalog References (Project Gutenberg IDs & metadata).
+ * Full text is not bundled locally in this seed; records have availabilityStatus 'external_source_available'
+ * and are hydrated on demand via /api/books/gutenberg-chapters when opened.
+ * Note: `chapterCount` on unhydrated catalog entries is an unparsed catalog estimate until hydrated.
  */
 export const GLOBAL_CATALOG_BOOKS: ExternalCatalogBook[] = [
   {

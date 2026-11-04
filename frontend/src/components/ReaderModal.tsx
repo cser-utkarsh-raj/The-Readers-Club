@@ -24,6 +24,7 @@ import {
   generateSingleTtsChunkWithRetry,
   isAudiobookReady,
   revokeAllTrackedAudioObjectUrls,
+  revokeTrackedAudioObjectUrl,
 } from '../utils/ttsEngine';
 import { CachedSummaryEntry } from '../utils/storage';
 import { BookPosterCover, PersonaPortraitSvg } from './TactileArt';
@@ -88,6 +89,8 @@ interface ReaderWorkspaceProps {
   onOpenSettingsTab: () => void;
   onOpenUploadTab?: () => void;
   onBackToCatalog?: () => void;
+  canRemoveFromLibrary?: boolean;
+  onRemoveBookFromLibrary?: (bookId: string) => void;
 }
 
 export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
@@ -106,6 +109,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   onOpenSettingsTab,
   onOpenUploadTab,
   onBackToCatalog,
+  canRemoveFromLibrary = false,
+  onRemoveBookFromLibrary,
 }) => {
   const initialChapterIdx =
     readingProgress &&
@@ -143,6 +148,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const speechSynthRef = useRef<SpeechSynthesisUtterance | null>(null);
   const ttsChunksRef = useRef<TtsAudioChunk[]>([]);
+  const ttsSessionIdRef = useRef<number>(0);
+  const ttsAbortControllerRef = useRef<AbortController | null>(null);
+  const summaryAbortControllerRef = useRef<AbortController | null>(null);
   ttsChunksRef.current = ttsChunks;
 
   const detailLevel: SummaryDetailLevel =
@@ -192,6 +200,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     setAiErrorBanner(null);
     setAiStatusBanner(null);
     setGutenbergFetchError(null);
+    summaryAbortControllerRef.current?.abort();
+    summaryAbortControllerRef.current = null;
     stopAndCleanupAudio(true);
 
     if (
@@ -205,6 +215,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
   useEffect(() => {
     return () => {
+      summaryAbortControllerRef.current?.abort();
+      summaryAbortControllerRef.current = null;
       stopAndCleanupAudio(true);
     };
   }, []);
@@ -286,11 +298,26 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       : [];
 
   function stopAndCleanupAudio(clearChunks = false) {
+    ttsSessionIdRef.current += 1;
+    if (ttsAbortControllerRef.current) {
+      ttsAbortControllerRef.current.abort();
+      ttsAbortControllerRef.current = null;
+    }
     if (audioElementRef.current) {
-      audioElementRef.current.pause();
       audioElementRef.current.onended = null;
       audioElementRef.current.ontimeupdate = null;
+      audioElementRef.current.pause();
+      try {
+        audioElementRef.current.removeAttribute('src');
+      } catch {
+        // Ignore in non-DOM environments
+      }
       audioElementRef.current = null;
+    }
+    if (speechSynthRef.current) {
+      speechSynthRef.current.onend = null;
+      speechSynthRef.current.onerror = null;
+      speechSynthRef.current = null;
     }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -350,7 +377,11 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       return true;
     }
 
-    // 2. Request genuine AI summary from backend
+    // 2. Request genuine AI summary from backend with AbortController support
+    summaryAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    summaryAbortControllerRef.current = controller;
+
     try {
       const response = await fetch('/api/summarize', {
         method: 'POST',
@@ -370,7 +401,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           authorStylePrompt: stylePrompt,
           contentHash: chapterContentHash,
         }),
+        signal: controller.signal,
       });
+
+      if (controller.signal.aborted) {
+        return false;
+      }
 
       const data = await response.json().catch(() => ({}));
 
@@ -409,6 +445,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       onMarkChapterSummaryFailed?.(book.id, targetChapter.id, errorMsg);
       return false;
     } catch (err: unknown) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError')
+      ) {
+        return false;
+      }
       const errorMsg =
         err instanceof Error
           ? err.message
@@ -487,6 +529,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     const sourceParagraphs = getAudioSourceParagraphs();
     if (sourceParagraphs.length === 0) return;
 
+    // Cancel any previous in-flight TTS generation session before starting a new one
+    ttsAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    ttsAbortControllerRef.current = controller;
+    const sessionId = ++ttsSessionIdRef.current;
+
     let workingChunks = [...ttsChunksRef.current];
     if (workingChunks.length === 0) {
       workingChunks = chunkTextForTts(sourceParagraphs, 720);
@@ -500,6 +548,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
     // Generate all pending chunks sequentially so audiobook only transitions to READY once all chunks succeed
     for (let i = 0; i < workingChunks.length; i++) {
+      if (ttsSessionIdRef.current !== sessionId || controller.signal.aborted) {
+        return;
+      }
       if (workingChunks[i].status === 'ready') continue;
 
       workingChunks = workingChunks.map((c, idx) =>
@@ -513,7 +564,15 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         narratorStylePrompt: narratorPrompt,
         maxRetries: 2,
         baseDelayMs: 350,
+        signal: controller.signal,
       });
+
+      if (ttsSessionIdRef.current !== sessionId || controller.signal.aborted) {
+        if (generated.objectUrl) {
+          revokeTrackedAudioObjectUrl(generated.objectUrl);
+        }
+        return;
+      }
 
       workingChunks = workingChunks.map((c, idx) =>
         idx === i ? generated : c
@@ -527,14 +586,23 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       }
     }
 
-    if (isAudiobookReady(workingChunks)) {
-      playReadyChunkAtIndex(workingChunks, startFromChunkIdx);
+    if (
+      ttsSessionIdRef.current === sessionId &&
+      !controller.signal.aborted &&
+      isAudiobookReady(workingChunks)
+    ) {
+      playReadyChunkAtIndex(workingChunks, startFromChunkIdx, sessionId);
     }
   }
 
   async function handleRetrySingleFailedChunk(chunkIndex: number) {
     const target = ttsChunksRef.current[chunkIndex];
     if (!target) return;
+
+    ttsAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    ttsAbortControllerRef.current = controller;
+    const sessionId = ++ttsSessionIdRef.current;
 
     const narratorPrompt =
       settings.useCustomNarrator && settings.customNarratorTrait.trim()
@@ -554,7 +622,15 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       narratorStylePrompt: narratorPrompt,
       maxRetries: 2,
       baseDelayMs: 350,
+      signal: controller.signal,
     });
+
+    if (ttsSessionIdRef.current !== sessionId || controller.signal.aborted) {
+      if (retried.objectUrl) {
+        revokeTrackedAudioObjectUrl(retried.objectUrl);
+      }
+      return;
+    }
 
     const updated = ttsChunksRef.current.map((c, idx) =>
       idx === chunkIndex ? retried : c
@@ -567,19 +643,26 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         (c) => c.status === 'pending' || c.status === 'failed'
       );
       if (!hasRemaining && isAudiobookReady(updated)) {
-        playReadyChunkAtIndex(updated, chunkIndex);
+        playReadyChunkAtIndex(updated, chunkIndex, sessionId);
       } else {
         await handlePrepareAndPlayAudiobook(chunkIndex);
       }
     }
   }
 
-  function playReadyChunkAtIndex(chunksList: TtsAudioChunk[], idx: number) {
+  function playReadyChunkAtIndex(
+    chunksList: TtsAudioChunk[],
+    idx: number,
+    expectedSessionId = ttsSessionIdRef.current
+  ) {
+    if (expectedSessionId !== ttsSessionIdRef.current) return;
     const safeIdx = Math.max(0, Math.min(chunksList.length - 1, idx));
     const chunk = chunksList[safeIdx];
     if (!chunk || !chunk.objectUrl) return;
 
     if (audioElementRef.current) {
+      audioElementRef.current.onended = null;
+      audioElementRef.current.ontimeupdate = null;
       audioElementRef.current.pause();
       audioElementRef.current = null;
     }
@@ -592,6 +675,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     setIsPausedAudio(false);
 
     audio.ontimeupdate = () => {
+      if (expectedSessionId !== ttsSessionIdRef.current) return;
       const sec = Math.floor(audio.currentTime || 0);
       setAudioPlaybackSeconds(sec);
       onUpdateReadingProgress?.(book.id, {
@@ -601,8 +685,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     };
 
     audio.onended = () => {
+      if (expectedSessionId !== ttsSessionIdRef.current) return;
       if (safeIdx + 1 < chunksList.length) {
-        playReadyChunkAtIndex(chunksList, safeIdx + 1);
+        playReadyChunkAtIndex(chunksList, safeIdx + 1, expectedSessionId);
       } else {
         setIsPlayingAudio(false);
         setIsPausedAudio(false);
@@ -610,6 +695,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     };
 
     audio.play().catch(() => {
+      if (expectedSessionId !== ttsSessionIdRef.current) return;
       setIsPlayingAudio(false);
       setIsPausedAudio(true);
     });
@@ -649,6 +735,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
   function handlePlayBrowserSpeechSynthesis(startChunkIdx = 0) {
     stopAndCleanupAudio(false);
+    const sessionId = ttsSessionIdRef.current;
     setUsingBrowserSpeechFallback(true);
 
     const sourceParagraphs = getAudioSourceParagraphs();
@@ -674,6 +761,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       speechSynthRef.current = utterance;
 
       utterance.onend = () => {
+        if (ttsSessionIdRef.current !== sessionId) return;
         if (safeIdx + 1 < chunks.length) {
           handlePlayBrowserSpeechSynthesis(safeIdx + 1);
         } else {
@@ -683,6 +771,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       };
 
       utterance.onerror = () => {
+        if (ttsSessionIdRef.current !== sessionId) return;
         setIsPlayingAudio(false);
       };
 
@@ -711,8 +800,28 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     full_text: {
       label:
         book.isPreCompressed !== false
-          ? 'FULL TEXT + CURATED EDITION'
+          ? 'CURATED CONDENSED EDITION'
           : 'VERIFIED FULL TEXT',
+      bg: book.isPreCompressed !== false ? '#F6C90E' : '#10B981',
+      text: '#111111',
+    },
+    full_text_available: {
+      label: 'VERIFIED FULL TEXT',
+      bg: '#10B981',
+      text: '#111111',
+    },
+    condensed_edition: {
+      label: 'CURATED CONDENSED EDITION',
+      bg: '#F6C90E',
+      text: '#111111',
+    },
+    external_source_available: {
+      label: 'EXTERNAL SOURCE (GUTENBERG)',
+      bg: '#38BDF8',
+      text: '#111111',
+    },
+    user_uploaded: {
+      label: 'USER UPLOADED EDITION',
       bg: '#10B981',
       text: '#111111',
     },
@@ -846,6 +955,15 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           >
             {activeBadge.label}
           </span>
+          {canRemoveFromLibrary && onRemoveBookFromLibrary && (
+            <button
+              type="button"
+              onClick={() => onRemoveBookFromLibrary(book.id)}
+              className="px-2.5 py-0.5 bg-[#E50914] hover:bg-[#B8000A] text-white font-mono-tech text-[11px] font-bold uppercase border border-white cursor-pointer"
+            >
+              Remove from Library
+            </button>
+          )}
         </div>
 
         <span className="font-mono-tech text-xs text-neutral-300 truncate max-w-xl">
@@ -885,7 +1003,11 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
         <div className="bg-[#111] text-[#F6C90E] px-3 py-1.5 border-2 border-white font-mono-tech text-xs font-bold shrink-0">
           {book.chapters.length > 0
-            ? `${book.chapters.length} Chapters · ${book.originalTotalPages}p Original → ${book.compactTotalPages}p Compact`
+            ? `${book.chapters.length} ${
+                book.chapterStructure === 'editorial_sections'
+                  ? 'Editorial Sections'
+                  : 'Chapters'
+              } · ${book.originalTotalPages}p Original → ${book.compactTotalPages}p Compact`
             : availabilityStatus === 'metadata_only'
             ? 'Catalog Metadata Record (0 Verifiable Chapters)'
             : 'Verifying Manuscript...'}
@@ -1154,7 +1276,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             <div>
               <div className="flex items-center justify-between pb-2 mb-2 border-b-2 border-[#111]">
                 <span className="font-display-brutal text-xs uppercase tracking-wider">
-                  CHAPTERS ({book.chapters.length})
+                  {book.chapterStructure === 'editorial_sections'
+                    ? `SECTIONS (${book.chapters.length})`
+                    : `CHAPTERS (${book.chapters.length})`}
                 </span>
                 {compressedChaptersCount < book.chapters.length && (
                   <button
@@ -1190,7 +1314,11 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                     >
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5 font-mono-tech text-[10px] uppercase opacity-75">
-                          <span>Chapter {ch.number}</span>
+                          <span>
+                            {book.chapterStructure === 'editorial_sections'
+                              ? `Section ${ch.number}`
+                              : `Chapter ${ch.number}`}
+                          </span>
                           {ch.pageStart && ch.pageEnd && (
                             <span>
                               (pp. {ch.pageStart}–{ch.pageEnd})
@@ -1231,7 +1359,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                   <div>
                     <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                      Original Manuscript · Chapter {currentChapter.number}
+                      {book.chapterStructure === 'editorial_sections'
+                        ? `Condensed Editorial Excerpt · Section ${currentChapter.number}`
+                        : `Original Manuscript · Chapter ${currentChapter.number}`}
                       {currentChapter.pageStart && currentChapter.pageEnd
                         ? ` (PDF Pages ${currentChapter.pageStart}–${currentChapter.pageEnd})`
                         : ''}
@@ -1244,6 +1374,25 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                     {currentChapter.originalPages} Pages
                   </span>
                 </div>
+
+                {book.availabilityStatus === 'condensed_edition' &&
+                  book.gutenbergId && (
+                    <div className="p-3 bg-[#F6C90E]/30 border-2 border-[#111] flex flex-wrap items-center justify-between gap-3 text-xs">
+                      <div>
+                        <span className="font-bold">
+                          Curated Condensed Edition ({book.chapters.length} Editorial Sections):
+                        </span>{' '}
+                        Full unabridged public-domain chapters are available from Project Gutenberg (#{book.gutenbergId}).
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void fetchGutenbergManuscript()}
+                        className="px-3 py-1 bg-[#111] text-[#F6C90E] font-mono-tech font-bold border border-[#111] cursor-pointer shrink-0 hover:bg-[#222]"
+                      >
+                        Load Unabridged Gutenberg Text →
+                      </button>
+                    </div>
+                  )}
 
                 <div className="space-y-4 font-editorial text-base leading-relaxed text-[#18181B]">
                   {currentChapter.originalText.map((para, i) => (
