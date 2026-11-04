@@ -30,6 +30,7 @@ import {
   CircularClubBadge,
   PersonaPortraitSvg,
   PocketCollageStrip,
+  ReadersClubLogo,
 } from './components/TactileArt';
 import { ReaderWorkspace } from './components/ReaderModal';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
@@ -39,19 +40,11 @@ import {
   Mic,
   PenTool,
   Search,
-  Globe,
   Loader2,
-  BookMarked,
   Sparkles,
   Flame,
-  Layers,
-  Cpu,
   Play,
   BookOpen,
-  ChevronLeft,
-  ChevronRight,
-  Compass,
-  Sliders,
 } from 'lucide-react';
 
 function getInitialRouteFromPath(): AppPageRoute {
@@ -65,26 +58,21 @@ function getInitialRouteFromPath(): AppPageRoute {
 }
 
 export default function App() {
-  // Multi-Page Web App Router State (synced with URL History API)
   const [activePage, setActivePage] = useState<AppPageRoute>(getInitialRouteFromPath);
 
-  // Pre-Pressed Compact Club Catalog + Hydrated On-Demand Volumes
   const [books, setBooks] = useState<BookItem[]>(OPEN_SOURCE_BOOKS);
   const [selectedBookId, setSelectedBookId] = useState<string>(
     OPEN_SOURCE_BOOKS[0].id
   );
   const [activeMode, setActiveMode] = useState<SummaryMode>('compact');
 
-  // Discovery, Genre, Search & Live API Pagination State
   const [selectedGenre, setSelectedGenre] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [liveApiBooks, setLiveApiBooks] = useState<ExternalCatalogBook[]>([]);
-  const [apiTotalCount, setApiTotalCount] = useState<number>(74280);
   const [catalogPage, setCatalogPage] = useState<number>(1);
   const [isSearchingApi, setIsSearchingApi] = useState<boolean>(false);
   const [featuredIndex, setFeaturedIndex] = useState<number>(0);
 
-  // Resident Voice Cast & Settings
   const [settings, setSettings] = useState<ClubSettings>({
     authorPersonality: 'taylor_swift',
     narratorPersonality: 'gandalf',
@@ -95,7 +83,6 @@ export default function App() {
     targetCompactRatio: 0.175,
   });
 
-  // Machine Learning (ML) User Taste Profile State
   const [tasteProfile, setTasteProfile] = useState<UserTasteProfile>({
     viewedBookIds: ['art-of-war', 'cat-pg-1184'],
     compressedBookIds: [],
@@ -108,12 +95,11 @@ export default function App() {
     searchHistory: [],
   });
 
-  // Manuscript Press (EPUB/PDF/TXT) State
+  // Upload state
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadAuthor, setUploadAuthor] = useState('');
   const [uploadRawText, setUploadRawText] = useState('');
   const [uploadFormat, setUploadFormat] = useState<'EPUB' | 'PDF' | 'TXT'>('EPUB');
-  const [uploadPreCompress, setUploadPreCompress] = useState<boolean>(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isProcessingUpload, setIsProcessingUpload] = useState(false);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
@@ -121,7 +107,6 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const discoveryDeckRef = useRef<HTMLDivElement | null>(null);
 
-  // Sync URL History API for true Multi-Page Web App navigation
   function navigateToPage(page: AppPageRoute) {
     setActivePage(page);
     if (typeof window !== 'undefined') {
@@ -141,7 +126,6 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  // Keep ML Taste Profile synced with active Author Persona
   useEffect(() => {
     setTasteProfile((prev) => ({
       ...prev,
@@ -156,7 +140,6 @@ export default function App() {
   const activeNarratorProfile =
     PERSONALITY_PROFILES[settings.narratorPersonality];
 
-  // Featured Books for Netflix-Style Hero Banner
   const featuredCatalogBooks = useMemo(
     () => GLOBAL_CATALOG_BOOKS.filter((b) => b.isFeatured),
     []
@@ -165,7 +148,6 @@ export default function App() {
     featuredCatalogBooks[featuredIndex % Math.max(1, featuredCatalogBooks.length)] ||
     GLOBAL_CATALOG_BOOKS[0];
 
-  // Combined Local + Live API Pool for Filtering & ML Ranking
   const combinedArchivePool = useMemo(() => {
     const seen = new Set<string>();
     const merged: ExternalCatalogBook[] = [];
@@ -179,7 +161,6 @@ export default function App() {
     return merged;
   }, [liveApiBooks]);
 
-  // Filtered Books by Genre & Search Query
   const filteredArchiveBooks = useMemo(() => {
     return combinedArchivePool.filter((b) => {
       const matchesGenre =
@@ -201,26 +182,22 @@ export default function App() {
     });
   }, [combinedArchivePool, selectedGenre, searchQuery]);
 
-  // ML Taste Recommendations (TF-IDF + Cosine Similarity)
   const mlRecommendations = useMemo(() => {
     return computeMlRecommendations(combinedArchivePool, tasteProfile, 12);
   }, [combinedArchivePool, tasteProfile]);
 
-  // Trending Top 12 Books
   const trendingBooks = useMemo(() => {
     return [...combinedArchivePool]
       .sort((a, b) => (b.trendingScore || 85) - (a.trendingScore || 85))
       .slice(0, 12);
   }, [combinedArchivePool]);
 
-  // 18+ Chapter Uncompressed Epics Row
-  const eighteenPlusChapterBooks = useMemo(() => {
+  const worldClassicsShelf = useMemo(() => {
     return combinedArchivePool
       .filter((b) => (b.chapterCount || 18) >= 18)
       .slice(0, 12);
   }, [combinedArchivePool]);
 
-  // Fetch Live Paginated Books from Backend (Gutendex 70k+ & Google Books)
   async function fetchLiveArchivePage(queryText: string, genreId: string, pageNum: number) {
     setIsSearchingApi(true);
     const catObj = GENRE_CATEGORIES.find((g) => g.id === genreId);
@@ -235,9 +212,6 @@ export default function App() {
       const resp = await fetch(`/api/books/discover?${params.toString()}`);
       if (resp.ok) {
         const data = await resp.json();
-        if (typeof data.totalAvailableCount === 'number') {
-          setApiTotalCount(data.totalAvailableCount);
-        }
         if (Array.isArray(data.books) && data.books.length > 0) {
           setLiveApiBooks((prev) =>
             pageNum === 1 ? data.books : [...prev, ...data.books]
@@ -245,7 +219,7 @@ export default function App() {
         }
       }
     } catch {
-      // Fallback already covered by 70+ local GLOBAL_CATALOG_BOOKS
+      // Covered by local catalog seed
     } finally {
       setIsSearchingApi(false);
     }
@@ -267,12 +241,10 @@ export default function App() {
     fetchLiveArchivePage(searchQuery, selectedGenre, 1);
   }
 
-  // Open an Uncompressed External / Catalog Book in the Reader Studio (keeping all 18+ chapters uncompressed until requested!)
   function handleOpenCatalogVolume(
     extBook: ExternalCatalogBook,
     initialMode: SummaryMode = 'compact'
   ) {
-    // Update ML taste profile with genre & book interaction
     setTasteProfile((prev) => ({
       ...prev,
       viewedBookIds: [...new Set([extBook.id, ...prev.viewedBookIds])].slice(0, 25),
@@ -290,7 +262,6 @@ export default function App() {
       return;
     }
 
-    // Build with preCompress = false so all 18+ chapters stay uncompressed until the user compresses chapters on demand!
     const hydrated = buildBookFromExternalCatalogItem(
       extBook,
       settings.authorPersonality,
@@ -302,7 +273,6 @@ export default function App() {
     navigateToPage('reader');
   }
 
-  // Open a Pre-Pressed Club Edition from OPEN_SOURCE_BOOKS
   function handleOpenPrePressedBook(
     bookItem: BookItem,
     initialMode: SummaryMode = 'compact'
@@ -359,8 +329,8 @@ export default function App() {
 
         const updatedMasterBullets = updatedChapters.map(
           (c) =>
-            `${c.title} (${c.originalPages}p → ${c.compactPages}p): ${
-              c.bulletPoints[0] || 'Uncompressed chapter — click Compress Chapter in Reader.'
+            `${c.title}: ${
+              c.bulletPoints[0] || 'Select this chapter in the reader to generate highlights.'
             }`
         );
 
@@ -424,7 +394,7 @@ export default function App() {
       }
     } catch {
       setUploadError(
-        'Could not parse file stream. Please try another EPUB, PDF, or TXT file.'
+        'Could not read that file. Please try another EPUB, PDF, or TXT file.'
       );
     } finally {
       setIsProcessingUpload(false);
@@ -434,12 +404,12 @@ export default function App() {
   async function handleCreateUploadedBook(e: React.FormEvent) {
     e.preventDefault();
     if (!uploadTitle.trim()) {
-      setUploadError('Please enter a volume title before importing.');
+      setUploadError('Please enter a book title.');
       return;
     }
     if (!uploadRawText.trim() || uploadRawText.trim().length < 60) {
       setUploadError(
-        'Please select an EPUB/PDF/TXT file or paste manuscript chapters.'
+        'Please choose an EPUB/PDF/TXT file or paste your book text.'
       );
       return;
     }
@@ -447,14 +417,13 @@ export default function App() {
     setUploadError(null);
     setIsProcessingUpload(true);
 
-    // Build book preserving ALL chapters 1-to-1 (e.g. 18 chapters -> 18 chapters)
     const newBook = buildBookFromExtractedText(
       uploadTitle.trim(),
       uploadAuthor.trim() || 'Independent Author',
       uploadRawText,
       uploadFormat,
       settings.authorPersonality,
-      uploadPreCompress
+      false
     );
 
     setBooks((prev) => [newBook, ...prev]);
@@ -468,46 +437,49 @@ export default function App() {
     navigateToPage('reader');
   }
 
-  function handleLoadSample18ChapterManuscript() {
-    setUploadTitle('The Eighteen Chronicles of Aethelgard');
-    setUploadAuthor('H. G. Wells & Club Archive');
+  function handleLoadSampleBook() {
+    setUploadTitle('The Time Machine');
+    setUploadAuthor('H. G. Wells');
     setUploadFormat('EPUB');
-    setUploadedFileName('eighteen-chronicles-aethelgard.epub');
+    setUploadedFileName('the-time-machine.epub');
     setUploadError(null);
     const sample18 = Array.from({ length: 18 }, (_, i) => {
-      return `Chapter ${i + 1}: The Meridian Mechanism — Movement ${i + 1}
-In Chapter ${i + 1}, the expedition calibrates the brass-and-quartz chronometer at station ${i + 1}, documenting how temporal currents reshape the societal hierarchy, architecture, and ecological balance of the archipelago.
+      return `Chapter ${i + 1}: Part ${i + 1} of the Voyage
+In this chapter, the Time Traveller recounts the next stage of his journey through time, observing how society, nature, and the earth itself transform across the ages.
 
-Each log entry in this movement establishes a distinct philosophical and scientific turning point that links directly to the next chapter without skipping a single narrative thread.`;
+Each scene builds on the previous chapter’s discoveries while raising new questions about humanity’s future.`;
     }).join('\n\n');
     setUploadRawText(sample18);
   }
 
   const navItems: { id: AppPageRoute; label: string }[] = [
-    { id: 'home', label: 'Discovery Home' },
-    { id: 'catalog', label: 'Global Catalog' },
-    { id: 'reader', label: 'Reader Studio' },
-    { id: 'press', label: 'Manuscript Press' },
-    { id: 'voices', label: 'Voice Studio' },
+    { id: 'home', label: 'Home' },
+    { id: 'catalog', label: 'Browse' },
+    { id: 'reader', label: 'Reader' },
+    { id: 'press', label: 'Upload' },
+    { id: 'voices', label: 'Voices' },
   ];
 
   return (
     <div className="min-h-screen bg-jacket-orange text-[#111] flex flex-col">
-      {/* MULTI-PAGE WEB APP HEADER BAR */}
-      <header className="flex items-center justify-between gap-4 px-4 sm:px-6 py-3.5 bg-[#111] text-white border-b-[3px] border-[#111] sticky top-0 z-40">
-        {/* Zone 1: Brand Wordmark */}
+      {/* CLEAN, USER-FRIENDLY HEADER WITH CUSTOM POP-ART LOGO */}
+      <header className="flex items-center justify-between gap-4 px-4 sm:px-6 py-3 bg-[#111] text-white border-b-[3px] border-[#111] sticky top-0 z-40">
+        {/* Zone 1: Pop-Art Logo + Brand Name */}
         <button
           type="button"
           onClick={() => navigateToPage('home')}
-          className="font-display-brutal text-lg tracking-tight text-[#F6C90E] whitespace-nowrap shrink-0 cursor-pointer"
+          className="flex items-center gap-2.5 cursor-pointer shrink-0 group"
         >
-          THE READERS CLUB
+          <ReadersClubLogo className="w-9 h-9 group-hover:scale-105 transition-transform" />
+          <span className="font-display-brutal text-lg tracking-tight text-[#F6C90E] whitespace-nowrap">
+            THE READERS CLUB
+          </span>
         </button>
 
-        {/* Zone 2: Multi-Page Navigation Links */}
+        {/* Zone 2: Simple 5-Page Navigation */}
         <nav
-          aria-label="Primary Web App Navigation"
-          className="flex items-center gap-1.5 sm:gap-3 overflow-x-auto py-1"
+          aria-label="Main Navigation"
+          className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto py-1"
         >
           {navItems.map((item) => {
             const isActive = activePage === item.id;
@@ -516,7 +488,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                 key={item.id}
                 type="button"
                 onClick={() => navigateToPage(item.id)}
-                className={`px-3 py-1.5 text-xs sm:text-sm font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer border-2 ${
+                className={`px-3.5 py-1.5 text-xs sm:text-sm font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer border-2 ${
                   isActive
                     ? 'bg-[#F6C90E] text-[#111] border-white font-display-brutal uppercase'
                     : 'bg-transparent text-neutral-200 border-transparent hover:text-[#F6C90E] hover:border-neutral-700'
@@ -528,7 +500,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
           })}
         </nav>
 
-        {/* Zone 3: Active Book Shortcut + PWA Install */}
+        {/* Zone 3: Continue Reading + PWA Install */}
         <div className="hidden lg:flex items-center gap-2.5 shrink-0">
           <PWAInstallButton />
           <button
@@ -537,26 +509,26 @@ Each log entry in this movement establishes a distinct philosophical and scienti
             className="px-3.5 py-1.5 text-xs font-display-brutal uppercase bg-[#E50914] text-white border-2 border-white hover:bg-[#B8000A] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
           >
             <BookOpen className="w-3.5 h-3.5" />
-            <span>Active: {activeBook.title.slice(0, 18)}</span>
+            <span>Continue Reading</span>
           </button>
         </div>
       </header>
 
       {/* =====================================================================
-          PAGE 1: HOME & NETFLIX-STYLE LITERARY DISCOVERY HUB (`/`)
+          PAGE 1: HOME (`/`)
          ===================================================================== */}
       {activePage === 'home' && (
         <main className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex-1 space-y-10">
-          {/* TOP TACTILE JACKET HERO (METAL SIGN + ENAMEL BADGES + ZIPPER + RED CORDUROY POCKET) */}
+          {/* TOP TACTILE JACKET HERO */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start relative">
             {/* LEFT JACKET PANEL (5 COLS) */}
             <div className="lg:col-span-5 flex flex-col gap-6 pt-2">
               <div className="relative">
-                {/* Top-Right Overlapping Enamel Badge */}
+                {/* Overlapping Enamel Pin Badge */}
                 <div className="hidden sm:block absolute -top-8 -right-4 z-20">
                   <CircularClubBadge
-                    topText="18 CHAPTERS IN · 18 OUT"
-                    bottomText="1-TO-1 CHAPTER PRESS"
+                    topText="ONE MORE CHAPTER"
+                    bottomText="THE READERS CLUB"
                     bgColor="#0047FF"
                     iconType="hippo_reader"
                     onClick={() => navigateToPage('catalog')}
@@ -582,44 +554,39 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                     className="w-3 h-3 rounded-full bg-neutral-300 border-2 border-[#444] absolute bottom-3 right-3"
                   />
 
-                  <div className="text-sm font-bold text-[#666] tracking-wide mb-2">
-                    74,000+ archive volumes · ml taste discovery
+                  <div className="flex items-center gap-2 text-sm font-bold text-[#555] tracking-wide mb-3">
+                    <ReadersClubLogo className="w-7 h-7 border-[#111]" />
+                    <span>books · chapter summaries · audiobooks</span>
                   </div>
 
                   <h1 className="font-display-brutal text-3xl sm:text-5xl leading-[1.03] uppercase tracking-tight text-[#111] text-balance">
-                    THE READERS
+                    EVERY GREAT
                     <br />
-                    CLUB FOR
+                    BOOK, IN
                     <br />
-                    <span className="text-[#EB5600]">CHAPTERWISE</span>
+                    <span className="text-[#EB5600]">YOUR</span>
                     <br />
-                    EDITIONS
+                    STYLE
                   </h1>
 
                   <p className="mt-4 text-sm sm:text-base font-semibold text-[#222] leading-relaxed max-w-md">
-                    Explore thousands of world classics with original cover posters. We{' '}
-                    <strong className="underline decoration-[#EB5600] decoration-2">
-                      compress chapters 1-to-1 on demand
-                    </strong>{' '}
-                    (an 18-chapter book stays 18 chapters—never flattened into 3) alongside our pre-pressed Compact Catalog and ML taste engine.
+                    Read timeless classics or upload your own books. Switch effortlessly between the original book, chapter-by-chapter compact editions, quick highlights, and narrated audio.
                   </p>
 
                   <div className="mt-5 pt-4 border-t-2 border-neutral-300 flex flex-wrap items-center gap-2.5">
                     <button
                       type="button"
-                      onClick={() =>
-                        discoveryDeckRef.current?.scrollIntoView({ behavior: 'smooth' })
-                      }
-                      className="px-4 py-2 bg-[#111] text-[#F6C90E] font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm hover:bg-[#222] cursor-pointer whitespace-nowrap"
+                      onClick={() => navigateToPage('reader')}
+                      className="px-4 py-2.5 bg-[#111] text-[#F6C90E] font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm hover:bg-[#222] cursor-pointer whitespace-nowrap"
                     >
-                      Explore Discovery Shelves ↓
+                      Start Reading
                     </button>
                     <button
                       type="button"
                       onClick={() => navigateToPage('catalog')}
-                      className="px-4 py-2 bg-[#E50914] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm hover:bg-[#B8000A] cursor-pointer whitespace-nowrap"
+                      className="px-4 py-2.5 bg-[#E50914] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm hover:bg-[#B8000A] cursor-pointer whitespace-nowrap"
                     >
-                      Browse All {apiTotalCount.toLocaleString()}+ Books
+                      Browse Library
                     </button>
                   </div>
                 </div>
@@ -628,14 +595,14 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                 <div className="mt-5 flex items-center justify-start gap-5 pl-2">
                   <CircularClubBadge
                     topText="READ LIKE YOU GIVE A DAMN"
-                    bottomText="EVERY CHAPTER INTACT"
+                    bottomText="CHAPTER BY CHAPTER"
                     bgColor="#F6C90E"
                     iconType="bird_scribe"
                     onClick={() => navigateToPage('reader')}
                   />
                   <CircularClubBadge
-                    topText="TRUST ME · I TESTED IT!"
-                    bottomText="ML TASTE & VOICE STUDIO"
+                    topText="PICK YOUR NARRATOR"
+                    bottomText="4 ICONIC VOICES"
                     bgColor="#E50914"
                     iconType="bee_tester"
                     onClick={() => navigateToPage('voices')}
@@ -643,11 +610,11 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                 </div>
               </div>
 
-              {/* Active Reading Desk Card */}
+              {/* Currently Reading Card */}
               <div className="bg-white border-[3px] border-[#111] p-4 shadow-brutal">
                 <div className="flex items-center justify-between text-xs font-mono-tech font-bold text-[#555] pb-2 border-b-2 border-[#111]">
-                  <span>CURRENTLY IN READER STUDIO</span>
-                  <span>{activeBook.chapters.length} CHAPTERS · 5 FORMATS</span>
+                  <span>CONTINUE READING</span>
+                  <span>{activeBook.chapters.length} CHAPTERS</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between gap-3.5">
                   <div className="w-14 h-20 border-2 border-[#111] shadow-brutal-sm shrink-0 overflow-hidden bg-[#111]">
@@ -664,10 +631,10 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       {activeBook.title}
                     </h2>
                     <p className="text-xs font-semibold text-[#444] truncate">
-                      {activeBook.author} · {activeBook.year}
+                      {activeBook.author}
                     </p>
                     <p className="text-xs font-mono-tech font-bold text-[#E50914] mt-1">
-                      {activeBook.originalTotalPages}p → {activeBook.compactTotalPages}p ({activeBook.chapters.length} Chapters)
+                      {activeBook.compactTotalPages}-Page Compact Edition
                     </p>
                   </div>
                   <button
@@ -675,20 +642,20 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                     onClick={() => navigateToPage('reader')}
                     className="px-3.5 py-2 bg-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase shadow-brutal-sm cursor-pointer shrink-0"
                   >
-                    Open Studio →
+                    Read →
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* CENTER ZIPPER DIVIDER COLUMN (1 COL ON DESKTOP) */}
+            {/* CENTER ZIPPER DIVIDER COLUMN */}
             <div className="hidden lg:flex lg:col-span-1 flex-col items-center self-stretch relative py-2 select-none">
               <button
                 type="button"
                 onClick={() =>
                   discoveryDeckRef.current?.scrollIntoView({ behavior: 'smooth' })
                 }
-                aria-label="Scroll to Discovery Shelves"
+                aria-label="Scroll to Books"
                 className="z-20 flex flex-col items-center group cursor-pointer focus:outline-none"
               >
                 <div className="w-8 h-9 bg-[#F6C90E] border-[3px] border-[#111] rounded-t-md flex items-center justify-center">
@@ -712,20 +679,20 @@ Each log entry in this movement establishes a distinct philosophical and scienti
               </div>
             </div>
 
-            {/* RIGHT JACKET POCKET: DYNAMIC SEARCH COMMAND + FEATURED SPOTLIGHT + LANYARD ID CARD (6 COLS) */}
+            {/* RIGHT JACKET POCKET: SEARCH, FEATURED BOOK & ACTIVE VOICE CARD (6 COLS) */}
             <div className="lg:col-span-6 flex flex-col pt-2 relative">
-              {/* THREE PAGE LAUNCHER TABS STICKING OUT OF POCKET TOP */}
+              {/* THREE SIMPLE POCKET TABS */}
               <div className="grid grid-cols-3 gap-1.5 px-2 items-end">
                 <button
                   type="button"
                   onClick={() => navigateToPage('catalog')}
-                  className="h-16 bg-[#F5B800] text-[#111] border-t-[3px] border-x-[3px] border-[#111] rounded-t-2xl px-3 shadow-brutal-sm z-10 cursor-pointer flex flex-col items-center justify-center"
+                  className="h-15 bg-[#F5B800] text-[#111] border-t-[3px] border-x-[3px] border-[#111] rounded-t-2xl px-3 shadow-brutal-sm z-10 cursor-pointer flex flex-col items-center justify-center"
                 >
-                  <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight whitespace-nowrap">
-                    DISCOVER
+                  <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight">
+                    LIBRARY
                   </span>
                   <span className="font-mono-tech text-[10px] font-bold">
-                    {apiTotalCount.toLocaleString()}+ BOOKS
+                    BROWSE ALL
                   </span>
                 </button>
 
@@ -734,8 +701,8 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => navigateToPage('press')}
                   className="h-13 hover:h-15 bg-[#0047FF] text-white border-t-[3px] border-x-[3px] border-[#111] rounded-t-2xl px-3 transition-all cursor-pointer flex flex-col items-center justify-center"
                 >
-                  <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight whitespace-nowrap">
-                    IMPORT
+                  <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight">
+                    UPLOAD
                   </span>
                   <span className="font-mono-tech text-[10px] font-bold text-[#F6C90E]">
                     EPUB / PDF
@@ -747,44 +714,34 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => navigateToPage('voices')}
                   className="h-13 hover:h-15 bg-[#FF1E1E] text-white border-t-[3px] border-x-[3px] border-[#111] rounded-t-2xl px-3 transition-all cursor-pointer flex flex-col items-center justify-center"
                 >
-                  <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight whitespace-nowrap">
+                  <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight">
                     VOICES
                   </span>
                   <span className="font-mono-tech text-[10px] font-bold text-white/90">
-                    STUDIO CAST
+                    4 PERSONAS
                   </span>
                 </button>
               </div>
 
               <PocketCollageStrip />
 
-              {/* RED CORDUROY POCKET BODY: DYNAMIC SEARCH + FEATURED NETFLIX SPOTLIGHT */}
+              {/* RED CORDUROY POCKET BODY */}
               <div className="bg-pocket-red border-[3px] border-[#111] shadow-brutal-lg p-4 sm:p-5 relative">
                 <div className="border-2 border-dashed border-[#111]/60 p-3.5 sm:p-4 bg-white/95 space-y-3.5">
-                  {/* Dynamic Search Bar */}
+                  {/* Simple Search & Genre Filter */}
                   <form onSubmit={handleDynamicSearchSubmit} className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <label
-                        htmlFor="home-dynamic-search"
-                        className="font-display-brutal text-xs sm:text-sm uppercase text-[#111] flex items-center gap-1.5"
-                      >
-                        <Search className="w-4 h-4 text-[#E50914]" />
-                        <span>DYNAMIC CATALOG &amp; GENRE SEARCH</span>
-                      </label>
-                      <span className="font-mono-tech text-[11px] font-bold text-[#0047FF]">
-                        ML TASTE ENGINE ACTIVE
-                      </span>
-                    </div>
-
                     <div className="flex gap-1.5">
-                      <input
-                        id="home-dynamic-search"
-                        type="text"
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Search by title, author, genre, or theme (e.g., Dostoevsky, Sci-Fi, Holmes, Stoicism)..."
-                        className="flex-1 px-3 py-2 bg-white border-2 border-[#111] text-xs sm:text-sm font-medium focus:outline-none focus:bg-[#F6C90E]/15"
-                      />
+                      <div className="relative flex-1">
+                        <Search className="w-4 h-4 text-[#555] absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          id="home-dynamic-search"
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="Search books, authors, or genres..."
+                          className="w-full pl-9 pr-3 py-2 bg-white border-2 border-[#111] text-xs sm:text-sm font-medium focus:outline-none focus:bg-[#F6C90E]/15"
+                        />
+                      </div>
                       <button
                         type="submit"
                         className="px-4 py-2 bg-[#111] text-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer hover:bg-[#222] shrink-0"
@@ -793,7 +750,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       </button>
                     </div>
 
-                    {/* Quick Genre Pills */}
+                    {/* Clean Genre Pills */}
                     <div className="flex flex-wrap items-center gap-1.5 pt-1">
                       {GENRE_CATEGORIES.map((g) => {
                         const active = selectedGenre === g.id;
@@ -807,7 +764,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                                 behavior: 'smooth',
                               });
                             }}
-                            className={`px-2 py-1 border-2 border-[#111] font-mono-tech text-[10px] font-bold cursor-pointer transition-colors ${
+                            className={`px-2.5 py-1 border-2 border-[#111] font-mono-tech text-[10px] font-bold cursor-pointer transition-colors ${
                               active
                                 ? 'bg-[#E50914] text-white'
                                 : 'bg-white text-[#111] hover:bg-[#F6C90E]/40'
@@ -820,7 +777,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                     </div>
                   </form>
 
-                  {/* NETFLIX-STYLE FEATURED BOOK SPOTLIGHT INSIDE POCKET */}
+                  {/* FEATURED BOOK SPOTLIGHT */}
                   <div className="p-3.5 bg-[#111] text-white border-[3px] border-[#111] shadow-brutal relative">
                     <div className="flex items-start gap-4">
                       <div className="w-20 h-28 sm:w-24 sm:h-34 border-2 border-[#F6C90E] shrink-0 overflow-hidden bg-neutral-900 shadow-brutal-sm">
@@ -834,13 +791,10 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono-tech font-bold">
                           <span className="px-1.5 py-0.5 bg-[#E50914] text-white border border-white">
-                            FEATURED SPOTLIGHT
+                            FEATURED BOOK
                           </span>
                           <span className="px-1.5 py-0.5 bg-[#10B981] text-[#111] font-extrabold">
-                            98% ML MATCH
-                          </span>
-                          <span className="px-1.5 py-0.5 bg-neutral-800 text-[#F6C90E] border border-neutral-600">
-                            {currentFeaturedBook.chapterCount || 20} CHAPTERS (1-TO-1)
+                            98% MATCH
                           </span>
                         </div>
 
@@ -848,8 +802,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                           {currentFeaturedBook.title}
                         </h2>
                         <div className="text-xs font-mono-tech text-[#F6C90E]">
-                          {currentFeaturedBook.author} · {currentFeaturedBook.year} ·{' '}
-                          {currentFeaturedBook.genre}
+                          {currentFeaturedBook.author} · {currentFeaturedBook.genre}
                         </div>
 
                         <p className="text-xs text-neutral-300 line-clamp-2 mt-1.5 leading-relaxed">
@@ -862,12 +815,10 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                             onClick={() =>
                               handleOpenCatalogVolume(currentFeaturedBook, 'compact')
                             }
-                            className="px-3 py-1.5 bg-[#F6C90E] text-[#111] font-display-brutal text-xs uppercase border border-white cursor-pointer hover:bg-[#FFE047] flex items-center gap-1.5"
+                            className="px-3.5 py-1.5 bg-[#F6C90E] text-[#111] font-display-brutal text-xs uppercase border border-white cursor-pointer hover:bg-[#FFE047] flex items-center gap-1.5"
                           >
                             <Play className="w-3.5 h-3.5 fill-current" />
-                            <span>
-                              Open All {currentFeaturedBook.chapterCount || 20} Chapters
-                            </span>
+                            <span>Read Now</span>
                           </button>
 
                           <button
@@ -879,7 +830,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                             }
                             className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white font-mono-tech text-xs border border-neutral-600 cursor-pointer"
                           >
-                            Next Spotlight →
+                            Next Book →
                           </button>
                         </div>
                       </div>
@@ -887,7 +838,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   </div>
                 </div>
 
-                {/* HANGING YELLOW LANYARD ID CARD */}
+                {/* HANGING YELLOW LANYARD ID CARD WITH POP-ART PORTRAITS */}
                 <div className="mt-3.5 flex flex-col sm:flex-row items-center gap-4 bg-badge-yellow border-[3px] border-[#111] rounded-2xl p-3.5 shadow-brutal-lg relative">
                   <div className="flex flex-col items-center shrink-0">
                     <div
@@ -900,21 +851,14 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   </div>
 
                   <div className="flex-1 min-w-0 w-full">
-                    <div className="bg-white border-2 border-[#111] px-3 py-1 text-center sm:text-left shadow-brutal-sm flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="font-mono-tech text-[10px] font-bold uppercase text-[#555]">
-                          RESIDENT PRESS CREDENTIAL · ML TASTE VECTOR
-                        </div>
-                        <div className="font-display-brutal text-base sm:text-lg uppercase text-[#111] truncate">
-                          Editor:{' '}
-                          {settings.useCustomAuthor && settings.customAuthorTrait
-                            ? settings.customAuthorTrait
-                            : activeAuthorProfile.name}{' '}
-                          · Audio:{' '}
-                          {settings.useCustomNarrator && settings.customNarratorTrait
-                            ? settings.customNarratorTrait
-                            : activeNarratorProfile.name}
-                        </div>
+                    <div className="bg-white border-2 border-[#111] px-3 py-1 text-center sm:text-left shadow-brutal-sm">
+                      <div className="font-mono-tech text-[10px] font-bold uppercase text-[#555]">
+                        ACTIVE NARRATOR &amp; SUMMARY VOICE
+                      </div>
+                      <div className="font-display-brutal text-base sm:text-lg uppercase text-[#111] truncate">
+                        {settings.useCustomAuthor && settings.customAuthorTrait
+                          ? settings.customAuthorTrait
+                          : activeAuthorProfile.name}
                       </div>
                     </div>
 
@@ -964,22 +908,17 @@ Each log entry in this movement establishes a distinct philosophical and scienti
           </div>
 
           {/* =================================================================
-              NETFLIX-STYLE MULTI-ROW DISCOVERY DECK (ML + TRENDING + GENRES)
+              CLEAN, USER-FRIENDLY BOOK SHELVES
              ================================================================= */}
           <div ref={discoveryDeckRef} className="space-y-8 pt-2">
-            {/* If a search query or specific genre is selected, show the Dynamic Filtered Results Shelf first */}
+            {/* Search or Genre Filter Results */}
             {(searchQuery.trim() !== '' || selectedGenre !== 'all') && (
               <section className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-[3px] border-[#111]">
                   <div>
-                    <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                      DYNAMIC SEARCH &amp; GENRE FILTER RESULTS
-                    </span>
                     <h2 className="font-display-brutal text-xl uppercase text-[#111]">
-                      {selectedGenre === 'all' ? 'All Genres' : selectedGenre}{' '}
-                      {searchQuery.trim() ? `· "${searchQuery.trim()}"` : ''} (
-                      {filteredArchiveBooks.length} Immediate +{' '}
-                      {apiTotalCount.toLocaleString()} Archive)
+                      {selectedGenre === 'all' ? 'Search Results' : selectedGenre}
+                      {searchQuery.trim() ? ` — "${searchQuery.trim()}"` : ''}
                     </h2>
                   </div>
                   <div className="flex items-center gap-2">
@@ -991,14 +930,14 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       }}
                       className="px-3 py-1.5 bg-white border-2 border-[#111] font-mono-tech text-xs font-bold cursor-pointer hover:bg-[#F6C90E]"
                     >
-                      Reset Filter
+                      Clear Filter
                     </button>
                     <button
                       type="button"
                       onClick={() => navigateToPage('catalog')}
                       className="px-3 py-1.5 bg-[#111] text-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer"
                     >
-                      Open Full Catalog Page →
+                      See All Books →
                     </button>
                   </div>
                 </div>
@@ -1011,31 +950,24 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       onClick={() => handleOpenCatalogVolume(item, 'compact')}
                       className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
                     >
-                      <div className="w-full h-48 border-b-2 border-[#111] relative bg-[#111] overflow-hidden">
+                      <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
                         <BookPosterCover
                           title={item.title}
                           author={item.author}
                           coverUrl={item.coverUrl}
                         />
-                        <span className="absolute top-2 left-2 bg-[#111] text-[#F6C90E] border border-white px-1.5 py-0.5 font-mono-tech text-[10px] font-bold">
-                          {item.chapterCount || 18} CH.
-                        </span>
                       </div>
                       <div className="p-2.5 flex-1 flex flex-col justify-between">
                         <div>
                           <div className="font-mono-tech text-[10px] font-bold text-[#E50914] uppercase truncate">
                             {item.genre}
                           </div>
-                          <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 mt-0.5">
+                          <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
                             {item.title}
                           </div>
                           <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
                             {item.author}
                           </div>
-                        </div>
-                        <div className="mt-2 pt-1.5 border-t border-neutral-200 flex items-center justify-between text-[10px] font-mono-tech font-bold">
-                          <span className="text-[#0047FF]">1-TO-1 PRESS</span>
-                          <span className="group-hover:underline">Open →</span>
                         </div>
                       </div>
                     </button>
@@ -1044,19 +976,16 @@ Each log entry in this movement establishes a distinct philosophical and scienti
               </section>
             )}
 
-            {/* ROW 1: ML NEURAL TASTE ENGINE — RECOMMENDED FOR YOU */}
+            {/* SHELF 1: PICKED FOR YOU (ML RECOMMENDATIONS) */}
             <section className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-[3px] border-[#111]">
                 <div>
-                  <div className="flex items-center gap-2 text-xs font-mono-tech font-bold text-[#0047FF]">
-                    <Cpu className="w-4 h-4" />
-                    <span>
-                      ML TASTE ENGINE · TF-IDF &amp; COSINE SIMILARITY RANKING FOR{' '}
-                      {activeAuthorProfile.name.toUpperCase()}
-                    </span>
+                  <div className="flex items-center gap-1.5 text-xs font-mono-tech font-bold text-[#0047FF]">
+                    <Sparkles className="w-4 h-4" />
+                    <span>PERSONALIZED RECOMMENDATIONS</span>
                   </div>
                   <h2 className="font-display-brutal text-xl sm:text-2xl uppercase text-[#111] mt-0.5">
-                    Recommended For Your Reading Vector
+                    Picked for You
                   </h2>
                 </div>
                 <button
@@ -1064,12 +993,12 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => navigateToPage('catalog')}
                   className="px-3 py-1.5 bg-[#111] text-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer"
                 >
-                  Explore Full Catalog →
+                  Browse All →
                 </button>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                {mlRecommendations.slice(0, 6).map(({ book, matchPercentage, matchReason }) => {
+                {mlRecommendations.slice(0, 6).map(({ book, matchPercentage }) => {
                   const ext = book as ExternalCatalogBook;
                   return (
                     <button
@@ -1078,36 +1007,28 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       onClick={() => handleOpenCatalogVolume(ext, 'compact')}
                       className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
                     >
-                      <div className="w-full h-48 border-b-2 border-[#111] relative bg-[#111] overflow-hidden">
+                      <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
                         <BookPosterCover
                           title={ext.title}
                           author={ext.author}
                           coverUrl={ext.coverUrl}
                         />
-                        <span className="absolute top-2 left-2 bg-[#10B981] text-[#111] border-2 border-[#111] px-1.5 py-0.5 font-mono-tech text-[10px] font-extrabold shadow-brutal-sm">
-                          {matchPercentage}% MATCH
-                        </span>
-                        <span className="absolute bottom-2 right-2 bg-[#111] text-[#F6C90E] border border-white px-1.5 py-0.5 font-mono-tech text-[10px] font-bold">
-                          {ext.chapterCount || 18} CHAPTERS
+                        <span className="absolute top-2 left-2 z-20 bg-[#10B981] text-[#111] border-2 border-[#111] px-1.5 py-0.5 font-mono-tech text-[10px] font-extrabold shadow-brutal-sm">
+                          {matchPercentage}% Match
                         </span>
                       </div>
 
                       <div className="p-2.5 flex-1 flex flex-col justify-between">
                         <div>
-                          <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-1">
+                          <div className="font-mono-tech text-[10px] font-bold text-[#0047FF] uppercase truncate">
+                            {ext.genre}
+                          </div>
+                          <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
                             {ext.title}
                           </div>
                           <div className="text-[11px] font-semibold text-[#444] truncate">
                             {ext.author}
                           </div>
-                          <p className="text-[10px] font-mono-tech text-[#555] line-clamp-2 mt-1">
-                            {matchReason}
-                          </p>
-                        </div>
-
-                        <div className="mt-2 pt-1.5 border-t border-neutral-200 flex items-center justify-between text-[10px] font-mono-tech font-bold">
-                          <span className="text-[#E50914]">ON-DEMAND CH.</span>
-                          <span className="underline">Open →</span>
                         </div>
                       </div>
                     </button>
@@ -1116,16 +1037,16 @@ Each log entry in this movement establishes a distinct philosophical and scienti
               </div>
             </section>
 
-            {/* ROW 2: TRENDING NOW IN THE READERS CLUB (NETFLIX TOP-10 STYLE) */}
+            {/* SHELF 2: TRENDING NOW */}
             <section className="bg-[#111] text-white border-[3px] border-[#111] p-5 shadow-brutal-lg">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-2 border-neutral-700">
                 <div>
-                  <div className="flex items-center gap-2 text-xs font-mono-tech font-bold text-[#F6C90E]">
+                  <div className="flex items-center gap-1.5 text-xs font-mono-tech font-bold text-[#F6C90E]">
                     <Flame className="w-4 h-4 text-[#E50914]" />
-                    <span>TRENDING ARCHIVE VOLUMES · MOST PRESSED THIS WEEK</span>
+                    <span>MOST READ THIS WEEK</span>
                   </div>
                   <h2 className="font-display-brutal text-xl sm:text-2xl uppercase text-white mt-0.5">
-                    Top Trending Club Volumes
+                    Trending Now
                   </h2>
                 </div>
                 <button
@@ -1133,7 +1054,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => navigateToPage('catalog')}
                   className="px-3 py-1.5 bg-[#F6C90E] text-[#111] border-2 border-white font-display-brutal text-xs uppercase cursor-pointer"
                 >
-                  View All Trending →
+                  See All →
                 </button>
               </div>
 
@@ -1145,17 +1066,14 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                     onClick={() => handleOpenCatalogVolume(item, 'compact')}
                     className="text-left bg-neutral-900 border-2 border-neutral-600 hover:border-[#F6C90E] transition-all cursor-pointer flex flex-col justify-between overflow-hidden group relative"
                   >
-                    <div className="w-full h-48 border-b border-neutral-700 relative bg-black overflow-hidden">
+                    <div className="w-full aspect-[2/3] border-b border-neutral-700 relative bg-black overflow-hidden">
                       <BookPosterCover
                         title={item.title}
                         author={item.author}
                         coverUrl={item.coverUrl}
                       />
-                      <span className="absolute top-2 left-2 bg-[#E50914] text-white border-2 border-white px-2 py-0.5 font-display-brutal text-xs">
-                        #0{idx + 1}
-                      </span>
-                      <span className="absolute bottom-2 right-2 bg-[#111]/90 text-[#F6C90E] border border-[#F6C90E] px-1.5 py-0.5 font-mono-tech text-[10px] font-bold">
-                        {item.chapterCount || 18} CH.
+                      <span className="absolute top-2 left-2 z-20 bg-[#E50914] text-white border-2 border-white px-2 py-0.5 font-display-brutal text-xs">
+                        #{idx + 1}
                       </span>
                     </div>
 
@@ -1164,17 +1082,12 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                         <div className="font-mono-tech text-[10px] text-[#F6C90E] uppercase truncate">
                           {item.genre}
                         </div>
-                        <div className="font-display-brutal text-xs uppercase text-white line-clamp-1 mt-0.5">
+                        <div className="font-display-brutal text-xs uppercase text-white line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
                           {item.title}
                         </div>
                         <div className="text-[11px] text-neutral-300 truncate">
                           {item.author}
                         </div>
-                      </div>
-
-                      <div className="mt-2 pt-1.5 border-t border-neutral-800 flex items-center justify-between text-[10px] font-mono-tech font-bold text-[#F6C90E]">
-                        <span>{item.pageCount || 210}p ARCHIVE</span>
-                        <span className="underline">Read →</span>
                       </div>
                     </div>
                   </button>
@@ -1182,28 +1095,28 @@ Each log entry in this movement establishes a distinct philosophical and scienti
               </div>
             </section>
 
-            {/* ROW 3: PRE-PRESSED COMPACT CLUB CATALOG (READY IMMEDIATELY) */}
+            {/* SHELF 3: CLUB FAVORITES */}
             <section className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-[3px] border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#059669]">
-                    SIGNATURE CLUB COMPACT CATALOG · PRE-PRESSED &amp; READY TO READ
+                    CURATED COMPACT EDITIONS
                   </span>
                   <h2 className="font-display-brutal text-xl sm:text-2xl uppercase text-[#111] mt-0.5">
-                    Curated Compact Editions ({OPEN_SOURCE_BOOKS.length} Volumes)
+                    Club Favorites
                   </h2>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-                {OPEN_SOURCE_BOOKS.map((b) => (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4">
+                {OPEN_SOURCE_BOOKS.slice(0, 12).map((b) => (
                   <button
                     key={b.id}
                     type="button"
                     onClick={() => handleOpenPrePressedBook(b, 'compact')}
                     className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
                   >
-                    <div className="w-full h-44 border-b-2 border-[#111] relative bg-[#111] overflow-hidden">
+                    <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
                       <BookPosterCover
                         title={b.title}
                         author={b.author}
@@ -1211,26 +1124,19 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                         coverColor={b.coverColor}
                         coverAccent={b.coverAccent}
                       />
-                      <span className="absolute top-2 left-2 bg-[#F6C90E] text-[#111] border border-[#111] px-1.5 py-0.5 font-mono-tech text-[10px] font-bold">
-                        PRE-PRESSED
-                      </span>
                     </div>
 
                     <div className="p-2.5 flex-1 flex flex-col justify-between">
                       <div>
-                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-1">
+                        <div className="font-mono-tech text-[10px] font-bold text-[#059669] uppercase truncate">
+                          {b.genre}
+                        </div>
+                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
                           {b.title}
                         </div>
-                        <div className="text-[11px] font-semibold text-[#444] truncate">
+                        <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
                           {b.author}
                         </div>
-                      </div>
-
-                      <div className="mt-2 pt-1.5 border-t border-neutral-200 flex items-center justify-between text-[10px] font-mono-tech font-bold">
-                        <span className="text-[#E50914]">
-                          {b.originalTotalPages}p → {b.compactTotalPages}p
-                        </span>
-                        <span className="underline">Read →</span>
                       </div>
                     </div>
                   </button>
@@ -1238,15 +1144,15 @@ Each log entry in this movement establishes a distinct philosophical and scienti
               </div>
             </section>
 
-            {/* ROW 4: 18+ CHAPTER EPICS (UNCOMPRESSED · 1-TO-1 ON-DEMAND CHAPTER COMPRESSION) */}
+            {/* SHELF 4: TIMELESS CLASSICS */}
             <section className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-[3px] border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    18-TO-27 CHAPTER MONUMENTAL WORKS · UNCOMPRESSED BY DEFAULT
+                    ESSENTIAL READING
                   </span>
                   <h2 className="font-display-brutal text-xl sm:text-2xl uppercase text-[#111] mt-0.5">
-                    Full-Chapter Epics (18 Chapters In → 18 Chapters Out)
+                    World Classics
                   </h2>
                 </div>
                 <button
@@ -1254,42 +1160,37 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => navigateToPage('catalog')}
                   className="px-3 py-1.5 bg-[#0047FF] text-white border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer"
                 >
-                  Browse All {GLOBAL_CATALOG_BOOKS.length}+ Indexed Epics →
+                  Explore All Books →
                 </button>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                {eighteenPlusChapterBooks.slice(0, 6).map((item) => (
+                {worldClassicsShelf.slice(0, 6).map((item) => (
                   <button
                     key={item.id}
                     type="button"
                     onClick={() => handleOpenCatalogVolume(item, 'compact')}
                     className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
                   >
-                    <div className="w-full h-48 border-b-2 border-[#111] relative bg-[#111] overflow-hidden">
+                    <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
                       <BookPosterCover
                         title={item.title}
                         author={item.author}
                         coverUrl={item.coverUrl}
                       />
-                      <span className="absolute top-2 left-2 bg-[#0047FF] text-white border border-white px-1.5 py-0.5 font-mono-tech text-[10px] font-bold">
-                        {item.chapterCount || 18} CHAPTERS
-                      </span>
                     </div>
 
                     <div className="p-2.5 flex-1 flex flex-col justify-between">
                       <div>
-                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-1">
+                        <div className="font-mono-tech text-[10px] font-bold text-[#E50914] uppercase truncate">
+                          {item.genre}
+                        </div>
+                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
                           {item.title}
                         </div>
                         <div className="text-[11px] font-semibold text-[#444] truncate">
                           {item.author}
                         </div>
-                      </div>
-
-                      <div className="mt-2 pt-1.5 border-t border-neutral-200 flex items-center justify-between text-[10px] font-mono-tech font-bold">
-                        <span className="text-[#111]">ON-DEMAND PRESS</span>
-                        <span className="underline text-[#E50914]">Open →</span>
                       </div>
                     </div>
                   </button>
@@ -1301,21 +1202,18 @@ Each log entry in this movement establishes a distinct philosophical and scienti
       )}
 
       {/* =====================================================================
-          PAGE 2: GLOBAL CATALOG & PAGINATED ARCHIVE EXPLORER (`/catalog`)
+          PAGE 2: BROWSE LIBRARY (`/catalog`)
          ===================================================================== */}
       {activePage === 'catalog' && (
         <main className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex-1 space-y-6">
           <div className="bg-metal-plate border-[3px] border-[#111] p-6 shadow-brutal-lg">
             <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b-2 border-[#111]">
               <div>
-                <div className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                  GLOBAL ARCHIVE · {apiTotalCount.toLocaleString()}+ PUBLIC DOMAIN &amp; GOOGLE BOOKS VOLUMES
-                </div>
-                <h1 className="font-display-brutal text-2xl sm:text-4xl uppercase text-[#111] mt-1">
-                  Global Literary Catalog &amp; Genre Index
+                <h1 className="font-display-brutal text-2xl sm:text-4xl uppercase text-[#111]">
+                  Browse Library
                 </h1>
                 <p className="text-xs sm:text-sm font-semibold text-[#333] mt-1">
-                  Every volume loads with its original cover poster and full chapter list (12–27+ chapters). Chapters remain uncompressed until you press them on demand in the Reader Studio.
+                  Search by title, author, or genre. Click any book to read or listen.
                 </p>
               </div>
 
@@ -1324,7 +1222,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search 74,000+ books by title, author, or topic..."
+                  placeholder="Search books or authors..."
                   className="w-full sm:w-80 px-3 py-2 bg-white border-2 border-[#111] text-xs sm:text-sm font-medium"
                 />
                 <button
@@ -1332,7 +1230,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   disabled={isSearchingApi}
                   className="px-4 py-2 bg-[#111] text-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer shrink-0"
                 >
-                  {isSearchingApi ? 'Searching...' : 'Search API'}
+                  {isSearchingApi ? 'Searching...' : 'Search'}
                 </button>
               </form>
             </div>
@@ -1366,8 +1264,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
           <div className="bg-reader-paper border-[3px] border-[#111] p-5 shadow-brutal-lg">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-4 border-b-2 border-[#111]">
               <span className="font-display-brutal text-sm uppercase">
-                Showing {filteredArchiveBooks.length} Indexed Volumes (Archive Page {catalogPage} of{' '}
-                {Math.max(120, Math.ceil(apiTotalCount / 32)).toLocaleString()})
+                {filteredArchiveBooks.length} Books
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -1376,7 +1273,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => setCatalogPage((p) => Math.max(1, p - 1))}
                   className="px-3 py-1 bg-white border-2 border-[#111] font-mono-tech text-xs font-bold cursor-pointer disabled:opacity-40"
                 >
-                  ← Prev API Page
+                  ← Previous
                 </button>
                 <span className="font-mono-tech text-xs font-bold px-2">
                   Page {catalogPage}
@@ -1387,7 +1284,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => setCatalogPage((p) => p + 1)}
                   className="px-3 py-1 bg-[#F6C90E] border-2 border-[#111] font-mono-tech text-xs font-bold cursor-pointer"
                 >
-                  Load More from Gutendex &amp; Google Books →
+                  Load More Books →
                 </button>
               </div>
             </div>
@@ -1395,7 +1292,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
             {isSearchingApi && filteredArchiveBooks.length === 0 ? (
               <div className="py-16 flex flex-col items-center justify-center gap-2 font-mono-tech text-sm">
                 <Loader2 className="w-8 h-8 animate-spin text-[#E50914]" />
-                <span>Querying Gutendex &amp; Google Books Archive...</span>
+                <span>Loading books...</span>
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
@@ -1406,33 +1303,25 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                     onClick={() => handleOpenCatalogVolume(item, 'compact')}
                     className="text-left bg-white border-[3px] border-[#111] shadow-brutal-sm hover:-translate-y-1 transition-transform cursor-pointer flex flex-col justify-between overflow-hidden group"
                   >
-                    <div className="w-full h-48 border-b-2 border-[#111] relative bg-[#111] overflow-hidden">
+                    <div className="w-full aspect-[2/3] border-b-2 border-[#111] relative bg-[#18181B] overflow-hidden">
                       <BookPosterCover
                         title={item.title}
                         author={item.author}
                         coverUrl={item.coverUrl}
                       />
-                      <span className="absolute top-2 left-2 bg-[#111] text-[#F6C90E] border border-white px-1.5 py-0.5 font-mono-tech text-[10px] font-bold">
-                        {item.chapterCount || 18} CHAPTERS
-                      </span>
                     </div>
 
                     <div className="p-2.5 flex-1 flex flex-col justify-between">
                       <div>
                         <div className="font-mono-tech text-[10px] font-bold text-[#0047FF] uppercase truncate">
-                          {item.genre} · {item.year}
+                          {item.genre}
                         </div>
-                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 mt-0.5">
+                        <div className="font-display-brutal text-xs uppercase text-[#111] line-clamp-2 min-h-[2rem] mt-0.5 leading-tight">
                           {item.title}
                         </div>
                         <div className="text-[11px] font-semibold text-[#444] truncate mt-0.5">
                           {item.author}
                         </div>
-                      </div>
-
-                      <div className="mt-2 pt-1.5 border-t border-neutral-200 flex items-center justify-between text-[10px] font-mono-tech font-bold">
-                        <span className="text-[#E50914]">1-TO-1 PRESS</span>
-                        <span className="underline">Open →</span>
                       </div>
                     </div>
                   </button>
@@ -1444,7 +1333,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
       )}
 
       {/* =====================================================================
-          PAGE 3: DEDICATED CHAPTER-BY-CHAPTER READER & AUDIO STUDIO (`/reader`)
+          PAGE 3: READER (`/reader`)
          ===================================================================== */}
       {activePage === 'reader' && (
         <main className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex-1">
@@ -1463,67 +1352,52 @@ Each log entry in this movement establishes a distinct philosophical and scienti
       )}
 
       {/* =====================================================================
-          PAGE 4: DEDICATED DIGITAL MANUSCRIPT PRESS (`/press`)
+          PAGE 4: UPLOAD BOOK (`/press`)
          ===================================================================== */}
       {activePage === 'press' && (
-        <main className="max-w-[1024px] w-full mx-auto px-4 sm:px-6 py-8 flex-1">
+        <main className="max-w-[960px] w-full mx-auto px-4 sm:px-6 py-8 flex-1">
           <div className="bg-pocket-red border-[3px] border-[#111] shadow-brutal-lg p-5 sm:p-6">
             <div className="border-2 border-dashed border-[#111]/60 p-5 sm:p-6 bg-white/95">
               <form onSubmit={handleCreateUploadedBook} className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b-[3px] border-[#111] pb-3">
                   <div>
-                    <div className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                      1-TO-1 CHAPTER EXTRACTION · EPUB / PDF / TXT
-                    </div>
                     <h1 className="font-display-brutal text-2xl sm:text-3xl uppercase text-[#111]">
-                      Digital Manuscript Press
+                      Upload Your Book
                     </h1>
                     <p className="text-xs sm:text-sm text-[#444] mt-1">
-                      Upload any digital book or paste manuscript chapters. All detected chapters (e.g., 18 chapters) are preserved 1-to-1 so you can compress chapters individually on demand.
+                      Upload an EPUB, PDF, or TXT file to read chapter-by-chapter summaries, highlights, and audio.
                     </p>
                   </div>
                   <button
                     type="button"
-                    onClick={handleLoadSample18ChapterManuscript}
+                    onClick={handleLoadSampleBook}
                     className="px-3.5 py-2 bg-[#F6C90E] border-2 border-[#111] shadow-brutal-sm font-display-brutal text-xs uppercase cursor-pointer hover:bg-[#FFE047]"
                   >
-                    Load 18-Chapter Sample EPUB
+                    Try Sample Book
                   </button>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-[#F3EFE6] border-2 border-[#111]">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".epub,.pdf,.txt,.md"
-                      onChange={handleFileChange}
-                      className="hidden"
-                      id="book-file-upload-page"
-                    />
-                    <label
-                      htmlFor="book-file-upload-page"
-                      className="px-4 py-2 bg-[#0047FF] text-white border-2 border-[#111] shadow-brutal-sm font-display-brutal text-xs uppercase flex items-center gap-2 cursor-pointer hover:bg-[#0039CC]"
-                    >
-                      <FileUp className="w-4 h-4" />
-                      <span>Select .EPUB / .PDF / .TXT File</span>
-                    </label>
-                    {uploadedFileName && (
-                      <span className="font-mono-tech text-xs font-bold text-[#059669]">
-                        Loaded: {uploadedFileName} ({uploadFormat})
-                      </span>
-                    )}
-                  </div>
-
-                  <label className="flex items-center gap-2 font-mono-tech text-xs font-bold cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={uploadPreCompress}
-                      onChange={(e) => setUploadPreCompress(e.target.checked)}
-                      className="w-4 h-4 accent-[#E50914]"
-                    />
-                    <span>Pre-compress all chapters on import (default: On-Demand per chapter)</span>
+                <div className="flex flex-wrap items-center gap-3 p-3.5 bg-[#F3EFE6] border-2 border-[#111]">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".epub,.pdf,.txt,.md"
+                    onChange={handleFileChange}
+                    className="hidden"
+                    id="book-file-upload-page"
+                  />
+                  <label
+                    htmlFor="book-file-upload-page"
+                    className="px-4 py-2 bg-[#0047FF] text-white border-2 border-[#111] shadow-brutal-sm font-display-brutal text-xs uppercase flex items-center gap-2 cursor-pointer hover:bg-[#0039CC]"
+                  >
+                    <FileUp className="w-4 h-4" />
+                    <span>Choose File (.EPUB, .PDF, .TXT)</span>
                   </label>
+                  {uploadedFileName && (
+                    <span className="font-mono-tech text-xs font-bold text-[#059669]">
+                      Selected: {uploadedFileName}
+                    </span>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1532,14 +1406,14 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       htmlFor="upload-book-title"
                       className="block font-mono-tech text-xs font-bold uppercase mb-1"
                     >
-                      Volume Title *
+                      Book Title *
                     </label>
                     <input
                       id="upload-book-title"
                       type="text"
                       value={uploadTitle}
                       onChange={(e) => setUploadTitle(e.target.value)}
-                      placeholder="e.g., The Eighteen Chronicles"
+                      placeholder="e.g., The Time Machine"
                       className="w-full px-3 py-2 bg-white border-2 border-[#111] text-sm font-medium focus:outline-none focus:bg-[#F6C90E]/15"
                     />
                   </div>
@@ -1566,14 +1440,14 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                     htmlFor="upload-book-manuscript"
                     className="block font-mono-tech text-xs font-bold uppercase mb-1"
                   >
-                    Extracted Manuscript Chapters (Chapter 1 .. Chapter N preserved 1-to-1) *
+                    Book Text (Auto-filled from file or paste below) *
                   </label>
                   <textarea
                     id="upload-book-manuscript"
-                    rows={8}
+                    rows={7}
                     value={uploadRawText}
                     onChange={(e) => setUploadRawText(e.target.value)}
-                    placeholder="Select an .epub or .pdf file above, click 'Load 18-Chapter Sample EPUB', or paste chapters here..."
+                    placeholder="Choose a file above, click 'Try Sample Book', or paste chapters here..."
                     className="w-full p-3 bg-white border-2 border-[#111] text-xs font-mono-tech focus:outline-none"
                   />
                 </div>
@@ -1592,9 +1466,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   disabled={isProcessingUpload}
                   className="w-full py-3 bg-[#111] text-[#F6C90E] hover:bg-[#222] font-display-brutal text-sm uppercase border-2 border-[#111] shadow-brutal cursor-pointer disabled:opacity-50"
                 >
-                  {isProcessingUpload
-                    ? 'Indexing Manuscript Chapters...'
-                    : 'Import Manuscript & Open in Reader Studio →'}
+                  {isProcessingUpload ? 'Adding Book...' : 'Open Book in Reader →'}
                 </button>
               </form>
             </div>
@@ -1603,7 +1475,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
       )}
 
       {/* =====================================================================
-          PAGE 5: DEDICATED EDITORIAL & NARRATOR VOICE STUDIO (`/voices`)
+          PAGE 5: VOICES (`/voices`)
          ===================================================================== */}
       {activePage === 'voices' && (
         <main className="max-w-[1140px] w-full mx-auto px-4 sm:px-6 py-8 flex-1 space-y-6">
@@ -1611,14 +1483,11 @@ Each log entry in this movement establishes a distinct philosophical and scienti
             <div className="border-2 border-dashed border-[#111]/60 p-5 bg-white/95 space-y-6">
               <div className="border-b-[3px] border-[#111] pb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    RESIDENT VOICE CAST &amp; ML TASTE AFFINITY
-                  </span>
                   <h1 className="font-display-brutal text-2xl sm:text-3xl uppercase text-[#111]">
-                    Editorial &amp; Narrator Voice Studio
+                    Author &amp; Narrator Voices
                   </h1>
                   <p className="text-xs sm:text-sm text-[#444] mt-1">
-                    Assign any of the four resident personalities—or define a custom voice—for chapter-by-chapter condensation and studio audio narration.
+                    Choose who summarizes your chapters and who narrates your audiobooks, or type your own custom personality.
                   </p>
                 </div>
                 <button
@@ -1626,19 +1495,19 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                   onClick={() => navigateToPage('reader')}
                   className="px-4 py-2 bg-[#111] text-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer"
                 >
-                  Return to Reader Studio →
+                  Back to Reader →
                 </button>
               </div>
 
-              {/* 1. EDITORIAL ADAPTER SELECTOR */}
+              {/* 1. AUTHOR VOICE */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="font-display-brutal text-sm uppercase flex items-center gap-2">
                     <PenTool className="w-4 h-4 text-[#E50914]" />
-                    <span>1. Editorial Adapter (Chapter Condensation Voice)</span>
+                    <span>Author Style (Written Summaries)</span>
                   </span>
                   <span className="font-mono-tech text-xs font-bold text-[#0047FF]">
-                    Active:{' '}
+                    Selected:{' '}
                     {settings.useCustomAuthor && settings.customAuthorTrait
                       ? settings.customAuthorTrait
                       : activeAuthorProfile.name}
@@ -1697,7 +1566,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
 
                 <input
                   type="text"
-                  aria-label="Custom Editorial Voice"
+                  aria-label="Custom Author Voice"
                   value={settings.customAuthorTrait}
                   onChange={(e) =>
                     handleUpdateSettings({
@@ -1705,20 +1574,20 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       useCustomAuthor: e.target.value.trim().length > 0,
                     })
                   }
-                  placeholder="Or enter a custom editorial persona (e.g., Sarcastic literature professor, Noir detective)..."
+                  placeholder="Or type a custom author style (e.g., Sarcastic teacher, Cozy storyteller)..."
                   className="w-full px-3 py-2 bg-white border-2 border-[#111] text-xs sm:text-sm font-medium"
                 />
               </div>
 
-              {/* 2. STUDIO NARRATOR SELECTOR */}
+              {/* 2. NARRATOR VOICE */}
               <div className="space-y-3 pt-4 border-t-2 border-[#111]/20">
                 <div className="flex items-center justify-between">
                   <span className="font-display-brutal text-sm uppercase flex items-center gap-2">
                     <Mic className="w-4 h-4 text-[#0047FF]" />
-                    <span>2. Studio Narrator (Compact Audiobook Voice)</span>
+                    <span>Narrator Voice (Audiobooks)</span>
                   </span>
                   <span className="font-mono-tech text-xs font-bold text-[#E50914]">
-                    Active:{' '}
+                    Selected:{' '}
                     {settings.useCustomNarrator && settings.customNarratorTrait
                       ? settings.customNarratorTrait
                       : activeNarratorProfile.name}
@@ -1785,7 +1654,7 @@ Each log entry in this movement establishes a distinct philosophical and scienti
                       useCustomNarrator: e.target.value.trim().length > 0,
                     })
                   }
-                  placeholder="Or enter a custom narrator delivery (e.g., Calm fireside baritone, Late-night radio host)..."
+                  placeholder="Or type a custom narrator style (e.g., Calm narrator, Late-night host)..."
                   className="w-full px-3 py-2 bg-white border-2 border-[#111] text-xs sm:text-sm font-medium"
                 />
               </div>
@@ -1794,52 +1663,26 @@ Each log entry in this movement establishes a distinct philosophical and scienti
         </main>
       )}
 
-      {/* QUIET EDITORIAL FOOTER */}
+      {/* SIMPLE, CLEAN FOOTER */}
       <footer className="mt-12 bg-[#111] text-neutral-300 border-t-[3px] border-[#111] px-6 py-4">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
-          <span className="font-display-brutal text-[#F6C90E] tracking-tight">
-            THE READERS CLUB · 1-TO-1 CHAPTER PRESS &amp; ML LITERARY ARCHIVE
-          </span>
-          <div className="flex items-center gap-3 font-mono-tech">
-            <button
-              type="button"
-              onClick={() => navigateToPage('home')}
-              className="hover:text-[#F6C90E] cursor-pointer"
-            >
-              Discovery Home
-            </button>
-            <span aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() => navigateToPage('catalog')}
-              className="hover:text-[#F6C90E] cursor-pointer"
-            >
-              Global Catalog ({apiTotalCount.toLocaleString()}+)
-            </button>
-            <span aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() => navigateToPage('reader')}
-              className="hover:text-[#F6C90E] cursor-pointer"
-            >
-              Reader Studio
-            </button>
-            <span aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() => navigateToPage('press')}
-              className="hover:text-[#F6C90E] cursor-pointer"
-            >
-              Manuscript Press
-            </button>
-            <span aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() => navigateToPage('voices')}
-              className="hover:text-[#F6C90E] cursor-pointer"
-            >
-              Voice Studio
-            </button>
+          <div className="flex items-center gap-2.5">
+            <ReadersClubLogo className="w-6 h-6" />
+            <span className="font-display-brutal text-[#F6C90E] tracking-tight">
+              THE READERS CLUB
+            </span>
+          </div>
+          <div className="flex items-center gap-4 font-bold">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => navigateToPage(item.id)}
+                className="hover:text-[#F6C90E] cursor-pointer"
+              >
+                {item.label}
+              </button>
+            ))}
           </div>
         </div>
       </footer>
