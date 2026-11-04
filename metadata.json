@@ -1,0 +1,6 @@
+{
+  "name": "The Readers Club",
+  "description": "Tactile pop-art AI book summarization club featuring proportional 30-40 page chapter-wise compact editions, open-source classics, EPUB/PDF uploads, and customizable Author & Narrator personalities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
