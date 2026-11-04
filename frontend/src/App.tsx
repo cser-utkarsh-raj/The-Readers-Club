@@ -3,40 +3,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   BookItem,
   ClubSettings,
+  ExternalCatalogBook,
   PresetPersonalityId,
   SummaryMode,
 } from './types/book';
 import { OPEN_SOURCE_BOOKS } from './data/openSourceBooks';
 import {
   PERSONALITY_PROFILES,
+  buildBookFromExternalCatalogItem,
   buildBookFromExtractedText,
 } from './utils/bookLogic';
 import { extractTextFromUploadedFile } from './utils/fileExtractor';
 import {
+  BookPosterCover,
   CircularClubBadge,
   PersonaPortraitSvg,
   PocketCollageStrip,
 } from './components/TactileArt';
 import { ReaderWorkspace } from './components/ReaderModal';
+import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
 import {
-  Upload,
-  BookOpen,
-  Headphones,
-  Sparkles,
-  Check,
   FileUp,
   ChevronDown,
-  UserCheck,
   Mic,
   PenTool,
-  Layers,
+  Search,
+  Globe,
+  Loader2,
+  BookMarked,
 } from 'lucide-react';
 
 type PocketTab = 'library' | 'upload' | 'settings';
+
+const CATALOG_CATEGORIES = [
+  { id: 'curated', label: 'Club Archive', query: '' },
+  { id: 'classics', label: 'Gutendex Classics', query: 'classic literature' },
+  { id: 'philosophy', label: 'Philosophy', query: 'philosophy stoicism plato' },
+  { id: 'scifi', label: 'Sci-Fi & Mystery', query: 'science fiction mystery verne' },
+  { id: 'history', label: 'History & Strategy', query: 'history civilization biography' },
+];
 
 export default function App() {
   const [books, setBooks] = useState<BookItem[]>(OPEN_SOURCE_BOOKS);
@@ -45,6 +54,12 @@ export default function App() {
   );
   const [activeMode, setActiveMode] = useState<SummaryMode>('compact');
   const [activePocketTab, setActivePocketTab] = useState<PocketTab>('library');
+
+  // External Catalog Discovery State (Gutendex + Google Books API)
+  const [catalogCategory, setCatalogCategory] = useState<string>('curated');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [discoveredBooks, setDiscoveredBooks] = useState<ExternalCatalogBook[]>([]);
+  const [isSearchingCatalog, setIsSearchingCatalog] = useState<boolean>(false);
 
   const [settings, setSettings] = useState<ClubSettings>({
     authorPersonality: 'taylor_swift',
@@ -74,6 +89,109 @@ export default function App() {
   const activeAuthorProfile = PERSONALITY_PROFILES[settings.authorPersonality];
   const activeNarratorProfile =
     PERSONALITY_PROFILES[settings.narratorPersonality];
+
+  async function fetchExternalCatalog(queryText: string) {
+    if (!queryText.trim()) {
+      setDiscoveredBooks([]);
+      return;
+    }
+    setIsSearchingCatalog(true);
+    try {
+      const resp = await fetch(
+        `/api/books/discover?q=${encodeURIComponent(queryText.trim())}`
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data.books) && data.books.length > 0) {
+          setDiscoveredBooks(data.books);
+          setIsSearchingCatalog(false);
+          return;
+        }
+      }
+    } catch {
+      // Fallback to direct client-side Google Books / Gutendex fetch if needed
+    }
+
+    try {
+      const gbRes = await fetch(
+        `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(
+          queryText.trim()
+        )}&maxResults=10&printType=books`
+      );
+      if (gbRes.ok) {
+        const gbData = await gbRes.json();
+        const items: ExternalCatalogBook[] = (gbData.items || [])
+          .filter((it: { volumeInfo?: { title?: string; imageLinks?: { thumbnail?: string } } }) =>
+            Boolean(it.volumeInfo?.title && it.volumeInfo?.imageLinks?.thumbnail)
+          )
+          .map((it: {
+            id: string;
+            volumeInfo: {
+              title: string;
+              authors?: string[];
+              publishedDate?: string;
+              categories?: string[];
+              description?: string;
+              pageCount?: number;
+              imageLinks: { thumbnail: string };
+            };
+          }) => ({
+            id: `gbooks-${it.id}`,
+            title: it.volumeInfo.title,
+            author: it.volumeInfo.authors?.[0] || 'Featured Author',
+            year: (it.volumeInfo.publishedDate || 'Classic').slice(0, 4),
+            genre: it.volumeInfo.categories?.[0] || 'Literary Edition',
+            coverUrl: it.volumeInfo.imageLinks.thumbnail.replace(/^http:\/\//i, 'https://'),
+            description:
+              it.volumeInfo.description ||
+              `${it.volumeInfo.title} by ${it.volumeInfo.authors?.[0] || 'Featured Author'}.`,
+            sourceApi: 'google_books',
+            pageCount: it.volumeInfo.pageCount || 210,
+          }));
+        setDiscoveredBooks(items);
+      }
+    } catch {
+      setDiscoveredBooks([]);
+    } finally {
+      setIsSearchingCatalog(false);
+    }
+  }
+
+  useEffect(() => {
+    const cat = CATALOG_CATEGORIES.find((c) => c.id === catalogCategory);
+    if (cat && cat.query) {
+      fetchExternalCatalog(cat.query);
+    } else if (catalogCategory === 'curated' && !searchQuery.trim()) {
+      setDiscoveredBooks([]);
+    }
+  }, [catalogCategory]);
+
+  function handleSearchSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!searchQuery.trim()) {
+      setCatalogCategory('curated');
+      setDiscoveredBooks([]);
+      return;
+    }
+    setCatalogCategory('search');
+    fetchExternalCatalog(searchQuery);
+  }
+
+  function handleSelectDiscoveredBook(extBook: ExternalCatalogBook) {
+    const existing = books.find((b) => b.id === extBook.id);
+    if (existing) {
+      setSelectedBookId(existing.id);
+      scrollToReader();
+      return;
+    }
+    const hydrated = buildBookFromExternalCatalogItem(
+      extBook,
+      settings.authorPersonality
+    );
+    setBooks((prev) => [hydrated, ...prev]);
+    setSelectedBookId(hydrated.id);
+    scrollToReader();
+  }
 
   function handleUpdateSettings(partial: Partial<ClubSettings>) {
     setSettings((prev) => ({ ...prev, ...partial }));
@@ -134,7 +252,7 @@ export default function App() {
         );
       }
       if (!uploadAuthor.trim()) {
-        setUploadAuthor('Uploaded Edition');
+        setUploadAuthor('Independent Author');
       }
     } catch {
       setUploadError(
@@ -148,12 +266,12 @@ export default function App() {
   async function handleCreateUploadedBook(e: React.FormEvent) {
     e.preventDefault();
     if (!uploadTitle.trim()) {
-      setUploadError('Please enter a book title before generating.');
+      setUploadError('Please enter a book title before building the edition.');
       return;
     }
     if (!uploadRawText.trim() || uploadRawText.trim().length < 60) {
       setUploadError(
-        'Please upload an EPUB/PDF/TXT file or paste at least a paragraph of book text.'
+        'Please upload an EPUB/PDF/TXT file or paste at least a paragraph of manuscript text.'
       );
       return;
     }
@@ -169,7 +287,6 @@ export default function App() {
       settings.authorPersonality
     );
 
-    // Attempt live Gemini 3.8 Flash chapter summarization for Chapter 1
     try {
       const firstChapter = newBook.chapters[0];
       if (firstChapter) {
@@ -222,7 +339,7 @@ export default function App() {
   }
 
   function handleLoadSampleEpubText() {
-    setUploadTitle('The Time Machine (1895 EPUB Import)');
+    setUploadTitle('The Time Machine');
     setUploadAuthor('H. G. Wells');
     setUploadFormat('EPUB');
     setUploadedFileName('the-time-machine-wells.epub');
@@ -265,54 +382,55 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
             onClick={() => setActivePocketTab('library')}
             className="hover:text-[#F6C90E] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Open Library
+            Catalog Archive
           </button>
           <button
             type="button"
             onClick={() => setActivePocketTab('upload')}
             className="hover:text-[#F6C90E] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Upload EPUB/PDF
+            Import Manuscript
           </button>
           <button
             type="button"
             onClick={() => setActivePocketTab('settings')}
             className="hover:text-[#F6C90E] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Persona Studio
+            Voice Studio
           </button>
           <button
             type="button"
             onClick={scrollToReader}
             className="hover:text-[#F6C90E] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Reader Deck
+            Reading Room
           </button>
         </nav>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center shrink-0">
+        {/* Zone 3: Primary action + PWA Install */}
+        <div className="flex items-center gap-2.5 shrink-0">
+          <PWAInstallButton />
           <button
             type="button"
             onClick={() => setActivePocketTab('upload')}
             className="px-4 py-2 text-xs font-display-brutal uppercase bg-[#F6C90E] text-[#111] border-2 border-white hover:bg-[#FFE047] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Upload Book
+            Import Book
           </button>
         </div>
       </header>
 
-      {/* MAIN TACTILE JACKET WORKSPACE (DIRECTLY INSPIRED BY REFERENCE IMAGE) */}
+      {/* MAIN TACTILE JACKET WORKSPACE */}
       <main id="top" className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex-1">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start relative">
-          {/* LEFT JACKET PANEL (5 COLS): METAL SIGN PLATE + POP-ART ENAMEL BADGES + QUICK STATS */}
+          {/* LEFT JACKET PANEL (5 COLS): METAL SIGN PLATE + POP-ART ENAMEL BADGES + TURNTABLE CARD */}
           <div className="lg:col-span-5 flex flex-col gap-6 pt-2">
             <div className="relative">
-              {/* Top-Right Overlapping Hippo Enamel Badge (Matching Reference Image) */}
+              {/* Top-Right Overlapping Enamel Badge */}
               <div className="hidden sm:block absolute -top-8 -right-4 z-20">
                 <CircularClubBadge
-                  topText="THIS IS NOT A 2-PAGE TL;DR"
-                  bottomText="IT'S A 30-40P EDITION"
+                  topText="CHAPTER BY CHAPTER"
+                  bottomText="CLUB ARCHIVE EDITION"
                   bgColor="#0047FF"
                   iconType="hippo_reader"
                   onClick={() => {
@@ -343,29 +461,28 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                 />
 
                 <div className="text-sm font-bold text-[#666] tracking-wide mb-2">
-                  est. 2026 · open source & epub/pdf club
+                  est. 2020 · literary archive & audio press
                 </div>
 
                 <h1 className="font-display-brutal text-3xl sm:text-5xl leading-[1.03] uppercase tracking-tight text-[#111] text-balance">
-                  THE READERS
+                  WORKING
                   <br />
-                  CLUB FOR
+                  EDITIONS FOR
                   <br />
-                  <span className="text-[#EB5600]">COMPACT</span>
+                  <span className="text-[#EB5600]">CLASSIC</span>
                   <br />
-                  EDITIONS
+                  LITERATURE
                 </h1>
 
                 <p className="mt-4 text-sm sm:text-base font-semibold text-[#222] leading-relaxed max-w-md">
-                  200-page books condensed into{' '}
+                  Full-length world classics and imported manuscripts distilled into{' '}
                   <strong className="underline decoration-[#EB5600] decoration-2">
-                    30–40 pages in the exact same chapter-wise structure
+                    proportional chapter-by-chapter compact editions
                   </strong>
-                  —never a shallow 2-page blurb. Plus Original, Super Short
-                  (2–4p), Bullet, and Compact Audiobook modes.
+                  , executive briefings, structured takeaways, and studio audio.
                 </p>
 
-                {/* Primary Quick Mode Pill-Free Action Bar */}
+                {/* Primary Quick Mode Action Bar */}
                 <div className="mt-5 pt-4 border-t-2 border-neutral-300 flex flex-wrap items-center gap-2.5">
                   <button
                     type="button"
@@ -375,7 +492,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                     }}
                     className="px-4 py-2 bg-[#111] text-[#F6C90E] font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm hover:bg-[#222] cursor-pointer whitespace-nowrap"
                   >
-                    Read 30-40p Compact ★
+                    Open Compact Edition
                   </button>
                   <button
                     type="button"
@@ -385,16 +502,16 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                     }}
                     className="px-4 py-2 bg-[#E50914] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm hover:bg-[#B8000A] cursor-pointer whitespace-nowrap"
                   >
-                    Play Compact Audio
+                    Listen Studio Audio
                   </button>
                 </div>
               </div>
 
-              {/* Bottom Enamel Club Badges Row (Matching Bird & Bee Badges in Reference Image) */}
+              {/* Bottom Enamel Club Badges Row */}
               <div className="mt-5 flex items-center justify-start gap-5 pl-2">
                 <CircularClubBadge
                   topText="READ LIKE YOU GIVE A DAMN"
-                  bottomText="CHAPTER BY CHAPTER"
+                  bottomText="EVERY CHAPTER INTACT"
                   bgColor="#F6C90E"
                   iconType="bird_scribe"
                   onClick={() => {
@@ -404,7 +521,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                 />
                 <CircularClubBadge
                   topText="TRUST ME · I TESTED IT!"
-                  bottomText="4 ICONIC PERSONAS"
+                  bottomText="VOICE & NARRATOR STUDIO"
                   bgColor="#E50914"
                   iconType="bee_tester"
                   onClick={() => setActivePocketTab('settings')}
@@ -412,22 +529,31 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
               </div>
             </div>
 
-            {/* Active Book Compression Snapshot Card on Left Jacket */}
+            {/* Active Book Snapshot Card on Left Jacket with Original Cover Poster */}
             <div className="bg-white border-[3px] border-[#111] p-4 shadow-brutal">
               <div className="flex items-center justify-between text-xs font-mono-tech font-bold text-[#555] pb-2 border-b-2 border-[#111]">
-                <span>NOW ON THE TURNTABLE</span>
-                <span>5 SUMMARY MODES READY</span>
+                <span>NOW ON THE READING DESK</span>
+                <span>{activeBook.chapters.length} CHAPTERS · 5 EDITIONS</span>
               </div>
-              <div className="mt-2.5 flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="font-display-brutal text-lg uppercase text-[#111]">
+              <div className="mt-3 flex items-center justify-between gap-3.5">
+                <div className="w-14 h-20 border-2 border-[#111] shadow-brutal-sm shrink-0 overflow-hidden bg-[#111]">
+                  <BookPosterCover
+                    title={activeBook.title}
+                    author={activeBook.author}
+                    coverUrl={activeBook.coverUrl}
+                    coverColor={activeBook.coverColor}
+                    coverAccent={activeBook.coverAccent}
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2 className="font-display-brutal text-lg uppercase text-[#111] truncate">
                     {activeBook.title}
                   </h2>
-                  <p className="text-xs font-medium text-[#444]">
-                    {activeBook.author} · {activeBook.originalTotalPages}p Original →{' '}
-                    <strong className="text-[#E50914]">
-                      {activeBook.compactTotalPages}p Compact Edition
-                    </strong>
+                  <p className="text-xs font-semibold text-[#444] truncate">
+                    {activeBook.author} · {activeBook.year}
+                  </p>
+                  <p className="text-xs font-mono-tech font-bold text-[#E50914] mt-1">
+                    {activeBook.originalTotalPages}p Archive → {activeBook.compactTotalPages}p Compact
                   </p>
                 </div>
                 <button
@@ -435,19 +561,19 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                   onClick={scrollToReader}
                   className="px-3 py-2 bg-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase shadow-brutal-sm cursor-pointer shrink-0"
                 >
-                  Open Reader ↓
+                  Read ↓
                 </button>
               </div>
             </div>
           </div>
 
-          {/* CENTER ZIPPER DIVIDER COLUMN (1 COL ON DESKTOP, MATCHING REFERENCE IMAGE) */}
+          {/* CENTER ZIPPER DIVIDER COLUMN (1 COL ON DESKTOP) */}
           <div className="hidden lg:flex lg:col-span-1 flex-col items-center self-stretch relative py-2 select-none">
             {/* Zipper Pull Slider at Top */}
             <button
               type="button"
               onClick={scrollToReader}
-              aria-label="Scroll to Reader Studio"
+              aria-label="Scroll to Reading Room"
               className="z-20 flex flex-col items-center group cursor-pointer focus:outline-none"
             >
               {/* Yellow Zipper Crown */}
@@ -482,7 +608,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
               aria-label="Club Pocket Folders"
               className="grid grid-cols-3 gap-1.5 px-2 items-end"
             >
-              {/* Tab 1: Yellow (LIBRARY) */}
+              {/* Tab 1: Yellow (CATALOG) */}
               <button
                 type="button"
                 role="tab"
@@ -495,14 +621,14 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                 }`}
               >
                 <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight whitespace-nowrap">
-                  LIBRARY
+                  CATALOG
                 </span>
                 <span className="font-mono-tech text-[10px] font-bold">
-                  {books.length} VOLUMES
+                  ARCHIVE & API
                 </span>
               </button>
 
-              {/* Tab 2: Cobalt Blue (UPLOAD EPUB/PDF) */}
+              {/* Tab 2: Cobalt Blue (IMPORT) */}
               <button
                 type="button"
                 role="tab"
@@ -515,14 +641,14 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                 }`}
               >
                 <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight whitespace-nowrap">
-                  UPLOAD
+                  IMPORT
                 </span>
                 <span className="font-mono-tech text-[10px] font-bold text-[#F6C90E]">
                   EPUB / PDF
                 </span>
               </button>
 
-              {/* Tab 3: Bright Red (PERSONAS / SETTINGS) */}
+              {/* Tab 3: Bright Red (VOICES) */}
               <button
                 type="button"
                 role="tab"
@@ -535,97 +661,216 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                 }`}
               >
                 <span className="font-display-brutal text-xs sm:text-sm uppercase tracking-tight whitespace-nowrap">
-                  PERSONAS
+                  VOICES
                 </span>
                 <span className="font-mono-tech text-[10px] font-bold text-white/90">
-                  4 PRESETS + AI
+                  STUDIO CAST
                 </span>
               </button>
             </div>
 
-            {/* Illustrated Pop-Art Collage Strip inside Pocket Mouth */}
+            {/* AI-Generated Pop-Art Collage Strip inside Pocket Mouth */}
             <PocketCollageStrip />
 
             {/* RED CORDUROY POCKET BODY */}
             <div className="bg-pocket-red border-[3px] border-[#111] shadow-brutal-lg p-4 sm:p-5 relative">
               {/* Stitched Inner Seam Line */}
               <div className="border-2 border-dashed border-[#111]/60 p-3 sm:p-4 bg-white/95">
-                {/* POCKET TAB 1: FREE & OPEN SOURCE BOOK LIBRARY */}
+                {/* POCKET TAB 1: BOOK CATALOG WITH GUTENDEX & GOOGLE BOOKS DISCOVERY + ORIGINAL COVER POSTERS */}
                 {activePocketTab === 'library' && (
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b-2 border-[#111] pb-2">
                       <div>
-                        <h2 className="font-display-brutal text-base uppercase text-[#111]">
-                          OPEN-SOURCE & UPLOADED CLUB SHELF
+                        <h2 className="font-display-brutal text-base uppercase text-[#111] flex items-center gap-1.5">
+                          <BookMarked className="w-4 h-4 text-[#E50914]" />
+                          <span>CLUB ARCHIVE & GLOBAL BOOK CATALOG</span>
                         </h2>
                         <p className="text-xs text-[#444]">
-                          Pick any volume to read in 1. Original, 2. Compact
-                          (30–40p), 3. Super Short, 4. Bullet, or 5. Compact
-                          Audiobook.
+                          Browse curated editions or search Gutendex &amp; Google Books with original cover posters.
                         </p>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[265px] overflow-y-auto pr-1">
-                      {books.map((b) => {
-                        const isSelected = b.id === selectedBookId;
+                    {/* Search Bar + Category Filter Chips */}
+                    <form onSubmit={handleSearchSubmit} className="flex gap-1.5">
+                      <div className="relative flex-1">
+                        <Search className="w-3.5 h-3.5 text-[#555] absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="Search Gutendex & Google Books (e.g., Dune, Jane Eyre, Kafka, Odyssey)..."
+                          className="w-full pl-8 pr-3 py-1.5 bg-white border-2 border-[#111] text-xs font-medium focus:outline-none focus:bg-[#F6C90E]/15"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={isSearchingCatalog}
+                        className="px-3 py-1.5 bg-[#111] text-[#F6C90E] border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer hover:bg-[#222] shrink-0"
+                      >
+                        {isSearchingCatalog ? 'Searching...' : 'Search'}
+                      </button>
+                    </form>
+
+                    {/* Category Filter Bar */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {CATALOG_CATEGORIES.map((cat) => {
+                        const active = catalogCategory === cat.id;
                         return (
                           <button
-                            key={b.id}
+                            key={cat.id}
                             type="button"
                             onClick={() => {
-                              setSelectedBookId(b.id);
+                              setCatalogCategory(cat.id);
+                              if (cat.id === 'curated') {
+                                setSearchQuery('');
+                              }
                             }}
-                            className={`text-left p-2.5 border-2 border-[#111] transition-all cursor-pointer flex flex-col justify-between ${
-                              isSelected
-                                ? 'bg-[#F6C90E] shadow-brutal-sm -translate-y-0.5'
-                                : 'bg-white hover:bg-neutral-100'
+                            className={`px-2.5 py-1 border-2 border-[#111] font-mono-tech text-[11px] font-bold cursor-pointer transition-colors ${
+                              active
+                                ? 'bg-[#111] text-[#F6C90E]'
+                                : 'bg-white text-[#111] hover:bg-[#F6C90E]/30'
                             }`}
                           >
-                            <div>
-                              <div className="flex items-center justify-between gap-1 text-[10px] font-mono-tech font-bold uppercase">
-                                <span
-                                  className="px-1.5 py-0.5 text-white border border-[#111]"
-                                  style={{ backgroundColor: b.coverColor }}
-                                >
-                                  {b.fileFormat || 'OPEN SOURCE'}
-                                </span>
-                                <span>
-                                  {b.originalTotalPages}p → {b.compactTotalPages}p
-                                </span>
-                              </div>
-                              <div className="font-display-brutal text-sm uppercase mt-1 text-[#111] line-clamp-1">
-                                {b.title}
-                              </div>
-                              <div className="text-xs font-semibold text-[#333]">
-                                {b.author} · {b.chapters.length} Chapters
-                              </div>
-                            </div>
-
-                            <div className="mt-1.5 pt-1 border-t border-[#111]/20 flex items-center justify-between text-[11px] font-mono-tech font-bold">
-                              <span>
-                                {isSelected ? '✓ ACTIVE IN READER' : 'SELECT BOOK'}
-                              </span>
-                              <span className="underline">Read →</span>
-                            </div>
+                            {cat.label}
                           </button>
                         );
                       })}
                     </div>
+
+                    {/* Book Grid with Original Cover Posters */}
+                    {isSearchingCatalog ? (
+                      <div className="py-12 flex flex-col items-center justify-center gap-2 text-xs font-mono-tech text-[#333]">
+                        <Loader2 className="w-6 h-6 animate-spin text-[#E50914]" />
+                        <span>Fetching editions &amp; original cover posters from Gutendex &amp; Google Books...</span>
+                      </div>
+                    ) : catalogCategory === 'curated' ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[290px] overflow-y-auto pr-1">
+                        {books.map((b) => {
+                          const isSelected = b.id === selectedBookId;
+                          return (
+                            <button
+                              key={b.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedBookId(b.id);
+                              }}
+                              className={`text-left p-2.5 border-2 border-[#111] transition-all cursor-pointer flex items-start gap-3 ${
+                                isSelected
+                                  ? 'bg-[#F6C90E] shadow-brutal-sm -translate-y-0.5'
+                                  : 'bg-white hover:bg-neutral-100'
+                              }`}
+                            >
+                              {/* Original Cover Poster Thumbnail */}
+                              <div className="w-12 h-17 border-2 border-[#111] shrink-0 overflow-hidden bg-[#111] shadow-brutal-sm">
+                                <BookPosterCover
+                                  title={b.title}
+                                  author={b.author}
+                                  coverUrl={b.coverUrl}
+                                  coverColor={b.coverColor}
+                                  coverAccent={b.coverAccent}
+                                />
+                              </div>
+
+                              <div className="min-w-0 flex-1 flex flex-col justify-between">
+                                <div>
+                                  <div className="flex items-center justify-between gap-1 text-[10px] font-mono-tech font-bold uppercase">
+                                    <span
+                                      className="px-1.5 py-0.5 text-white border border-[#111] truncate"
+                                      style={{ backgroundColor: b.coverColor }}
+                                    >
+                                      {b.year}
+                                    </span>
+                                    <span className="shrink-0">
+                                      {b.originalTotalPages}p → {b.compactTotalPages}p
+                                    </span>
+                                  </div>
+                                  <div className="font-display-brutal text-xs sm:text-sm uppercase mt-1 text-[#111] line-clamp-1">
+                                    {b.title}
+                                  </div>
+                                  <div className="text-[11px] font-semibold text-[#333] truncate">
+                                    {b.author}
+                                  </div>
+                                </div>
+
+                                <div className="mt-1.5 pt-1 border-t border-[#111]/20 flex items-center justify-between text-[10px] font-mono-tech font-bold">
+                                  <span>
+                                    {isSelected ? '✓ ON DESK' : `${b.chapters.length} CHAPTERS`}
+                                  </span>
+                                  <span className="underline">Open →</span>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[290px] overflow-y-auto pr-1">
+                        {discoveredBooks.map((ext) => {
+                          const isSelected = selectedBookId === ext.id;
+                          return (
+                            <button
+                              key={ext.id}
+                              type="button"
+                              onClick={() => handleSelectDiscoveredBook(ext)}
+                              className={`text-left p-2.5 border-2 border-[#111] transition-all cursor-pointer flex items-start gap-3 ${
+                                isSelected
+                                  ? 'bg-[#F6C90E] shadow-brutal-sm -translate-y-0.5'
+                                  : 'bg-white hover:bg-neutral-100'
+                              }`}
+                            >
+                              <div className="w-12 h-17 border-2 border-[#111] shrink-0 overflow-hidden bg-[#111] shadow-brutal-sm">
+                                <BookPosterCover
+                                  title={ext.title}
+                                  author={ext.author}
+                                  coverUrl={ext.coverUrl}
+                                  coverColor="#1E293B"
+                                  coverAccent="#F6C90E"
+                                />
+                              </div>
+
+                              <div className="min-w-0 flex-1 flex flex-col justify-between">
+                                <div>
+                                  <div className="flex items-center justify-between gap-1 text-[10px] font-mono-tech font-bold uppercase">
+                                    <span className="px-1.5 py-0.5 bg-[#0047FF] text-white border border-[#111] flex items-center gap-1">
+                                      <Globe className="w-2.5 h-2.5" />
+                                      <span>
+                                        {ext.sourceApi === 'gutendex' ? 'GUTENDEX' : 'GOOGLE BOOKS'}
+                                      </span>
+                                    </span>
+                                    <span>{ext.year}</span>
+                                  </div>
+                                  <div className="font-display-brutal text-xs sm:text-sm uppercase mt-1 text-[#111] line-clamp-1">
+                                    {ext.title}
+                                  </div>
+                                  <div className="text-[11px] font-semibold text-[#333] truncate">
+                                    {ext.author}
+                                  </div>
+                                </div>
+
+                                <div className="mt-1.5 pt-1 border-t border-[#111]/20 flex items-center justify-between text-[10px] font-mono-tech font-bold">
+                                  <span>BUILD 5 EDITIONS</span>
+                                  <span className="underline text-[#E50914]">Read →</span>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {/* POCKET TAB 2: UPLOAD EPUB / PDF / TXT */}
+                {/* POCKET TAB 2: IMPORT EPUB / PDF / TXT */}
                 {activePocketTab === 'upload' && (
                   <form onSubmit={handleCreateUploadedBook} className="space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b-2 border-[#111] pb-2">
                       <div>
                         <h2 className="font-display-brutal text-base uppercase text-[#111]">
-                          UPLOAD EPUB / PDF TO 30–40P COMPACT EDITION
+                          MANUSCRIPT &amp; E-BOOK PRESS (EPUB / PDF / TXT)
                         </h2>
                         <p className="text-xs text-[#444]">
-                          Preserves chapter-by-chapter structure proportionally
-                          instead of flattening into a 2-page summary.
+                          Import any digital volume to generate a proportional chapter-by-chapter compact edition and audio stream.
                         </p>
                       </div>
                       <button
@@ -652,7 +897,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                         className="px-3.5 py-1.5 bg-[#0047FF] text-white border-2 border-[#111] shadow-brutal-sm font-display-brutal text-xs uppercase flex items-center gap-2 cursor-pointer hover:bg-[#0039CC]"
                       >
                         <FileUp className="w-4 h-4" />
-                        <span>Choose .EPUB / .PDF / .TXT File</span>
+                        <span>Select .EPUB / .PDF / .TXT File</span>
                       </label>
                       {uploadedFileName && (
                         <span className="font-mono-tech text-xs font-bold text-[#059669]">
@@ -667,7 +912,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                           htmlFor="upload-book-title"
                           className="block font-mono-tech text-xs font-bold uppercase mb-1"
                         >
-                          Book Title *
+                          Volume Title *
                         </label>
                         <input
                           id="upload-book-title"
@@ -683,7 +928,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                           htmlFor="upload-book-author"
                           className="block font-mono-tech text-xs font-bold uppercase mb-1"
                         >
-                          Original Author
+                          Author
                         </label>
                         <input
                           id="upload-book-author"
@@ -701,14 +946,14 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                         htmlFor="upload-book-manuscript"
                         className="block font-mono-tech text-xs font-bold uppercase mb-1"
                       >
-                        Extracted Manuscript / Chapters (Auto-filled from EPUB/PDF or Paste) *
+                        Extracted Manuscript Chapters *
                       </label>
                       <textarea
                         id="upload-book-manuscript"
                         rows={3}
                         value={uploadRawText}
                         onChange={(e) => setUploadRawText(e.target.value)}
-                        placeholder="Upload an .epub or .pdf file above, click 'Load Sample EPUB', or paste chapters here..."
+                        placeholder="Select an .epub or .pdf file above, load the sample manuscript, or paste chapters here..."
                         className="w-full p-2 bg-white border-2 border-[#111] text-xs font-mono-tech focus:outline-none"
                       />
                     </div>
@@ -728,24 +973,21 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                       className="w-full py-2 bg-[#111] text-[#F6C90E] hover:bg-[#222] font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm cursor-pointer disabled:opacity-50"
                     >
                       {isProcessingUpload
-                        ? 'Building Proportional 30–40p Chapterwise Edition...'
-                        : 'Generate 30–40p Compact Edition + All 5 Formats →'}
+                        ? 'Building Chapterwise Compact Edition...'
+                        : 'Press Volume into Club Archive →'}
                     </button>
                   </form>
                 )}
 
-                {/* POCKET TAB 3: SETTINGS — AUTHOR & NARRATOR PERSONALITIES */}
+                {/* POCKET TAB 3: STUDIO VOICES — AUTHOR & NARRATOR PERSONALITIES WITH AI POP-ART PORTRAITS */}
                 {activePocketTab === 'settings' && (
                   <div className="space-y-3">
                     <div className="border-b-2 border-[#111] pb-1.5">
                       <h2 className="font-display-brutal text-base uppercase text-[#111]">
-                        AUTHOR & NARRATOR PERSONALITY STUDIO
+                        EDITORIAL &amp; NARRATOR VOICE STUDIO
                       </h2>
                       <p className="text-xs text-[#444]">
-                        Assign any of the 4 preset personalities (or a custom
-                        persona like &ldquo;Sarcastic teacher&rdquo; or &ldquo;Calm
-                        narrator&rdquo;) independently to your{' '}
-                        <strong>Author</strong> and <strong>Narrator</strong>.
+                        Pair any resident personality—or a custom literary voice—independently for written adaptation and studio audio.
                       </p>
                     </div>
 
@@ -754,7 +996,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                       <div className="flex items-center justify-between">
                         <span className="font-display-brutal text-xs uppercase flex items-center gap-1.5">
                           <PenTool className="w-3.5 h-3.5 text-[#E50914]" />
-                          <span>1. Author Personality (Text Summarizer)</span>
+                          <span>Editorial Adapter (Written Editions)</span>
                         </span>
                         <span className="font-mono-tech text-[11px] font-bold text-[#0047FF]">
                           Active:{' '}
@@ -772,7 +1014,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                             'deadpool',
                             'gandalf',
                           ] as PresetPersonalityId[]
-                        ).map((pid, idx) => {
+                        ).map((pid) => {
                           const p = PERSONALITY_PROFILES[pid];
                           const isSelected =
                             !settings.useCustomAuthor &&
@@ -781,38 +1023,40 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                             <button
                               key={pid}
                               type="button"
-                              aria-label={`Set Author personality to ${p.name}`}
+                              aria-label={`Set Editorial personality to ${p.name}`}
                               onClick={() =>
                                 handleUpdateSettings({
                                   authorPersonality: pid,
                                   useCustomAuthor: false,
                                 })
                               }
-                              className={`p-2 border-2 border-[#111] text-left transition-all cursor-pointer ${
+                              className={`p-2 border-2 border-[#111] text-left transition-all cursor-pointer flex items-center gap-2 ${
                                 isSelected
                                   ? 'bg-[#F6C90E] shadow-brutal-sm -translate-y-0.5'
                                   : 'bg-white hover:bg-neutral-100'
                               }`}
                             >
-                              <div className="font-mono-tech text-[10px] font-bold">
-                                0{idx + 1}. AUTHOR
+                              <div className="w-9 h-9 border border-[#111] shrink-0 overflow-hidden">
+                                <PersonaPortraitSvg personaId={pid} />
                               </div>
-                              <div className="font-display-brutal text-xs uppercase truncate">
-                                {p.name}
-                              </div>
-                              <div className="text-[10px] text-[#333] line-clamp-1">
-                                {p.roleTitle}
+                              <div className="min-w-0">
+                                <div className="font-display-brutal text-[11px] uppercase truncate">
+                                  {p.name}
+                                </div>
+                                <div className="text-[10px] text-[#333] truncate">
+                                  {p.roleTitle}
+                                </div>
                               </div>
                             </button>
                           );
                         })}
                       </div>
 
-                      {/* Custom Author Personality Input (e.g., Sarcastic teacher) */}
+                      {/* Custom Author Personality Input */}
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
-                          aria-label="Custom Author Personality"
+                          aria-label="Custom Editorial Voice"
                           value={settings.customAuthorTrait}
                           onChange={(e) =>
                             handleUpdateSettings({
@@ -820,7 +1064,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                               useCustomAuthor: e.target.value.trim().length > 0,
                             })
                           }
-                          placeholder="Or type custom Author style (e.g. Sarcastic teacher, Detective noir)..."
+                          placeholder="Or enter a custom editorial voice (e.g., Oxford historian, Noir detective)..."
                           className="flex-1 px-2.5 py-1 bg-white border-2 border-[#111] text-xs font-medium"
                         />
                       </div>
@@ -831,7 +1075,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                       <div className="flex items-center justify-between">
                         <span className="font-display-brutal text-xs uppercase flex items-center gap-1.5">
                           <Mic className="w-3.5 h-3.5 text-[#0047FF]" />
-                          <span>2. Narrator Personality (Compact Audio)</span>
+                          <span>Studio Narrator (Audio Editions)</span>
                         </span>
                         <span className="font-mono-tech text-[11px] font-bold text-[#E50914]">
                           Active:{' '}
@@ -850,7 +1094,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                             'deadpool',
                             'gandalf',
                           ] as PresetPersonalityId[]
-                        ).map((pid, idx) => {
+                        ).map((pid) => {
                           const p = PERSONALITY_PROFILES[pid];
                           const isSelected =
                             !settings.useCustomNarrator &&
@@ -866,31 +1110,33 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                                   useCustomNarrator: false,
                                 })
                               }
-                              className={`p-2 border-2 border-[#111] text-left transition-all cursor-pointer ${
+                              className={`p-2 border-2 border-[#111] text-left transition-all cursor-pointer flex items-center gap-2 ${
                                 isSelected
                                   ? 'bg-[#0047FF] text-white shadow-brutal-sm -translate-y-0.5'
                                   : 'bg-white text-[#111] hover:bg-neutral-100'
                               }`}
                             >
-                              <div className="font-mono-tech text-[10px] font-bold opacity-80">
-                                0{idx + 1}. NARRATOR
+                              <div className="w-9 h-9 border border-[#111] shrink-0 overflow-hidden">
+                                <PersonaPortraitSvg personaId={pid} />
                               </div>
-                              <div className="font-display-brutal text-xs uppercase truncate">
-                                {p.name}
-                              </div>
-                              <div className="text-[10px] opacity-90 line-clamp-1">
-                                Voice: {p.ttsVoiceName}
+                              <div className="min-w-0">
+                                <div className="font-display-brutal text-[11px] uppercase truncate">
+                                  {p.name}
+                                </div>
+                                <div className="text-[10px] opacity-90 truncate">
+                                  Studio: {p.ttsVoiceName}
+                                </div>
                               </div>
                             </button>
                           );
                         })}
                       </div>
 
-                      {/* Custom Narrator Personality Input (e.g., Calm narrator style) */}
+                      {/* Custom Narrator Personality Input */}
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
-                          aria-label="Custom Narrator Personality"
+                          aria-label="Custom Narrator Voice"
                           value={settings.customNarratorTrait}
                           onChange={(e) =>
                             handleUpdateSettings({
@@ -898,7 +1144,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                               useCustomNarrator: e.target.value.trim().length > 0,
                             })
                           }
-                          placeholder="Or type custom Narrator style (e.g. Calm bedtime narrator, Late-night radio host)..."
+                          placeholder="Or enter a custom narrator cadence (e.g., Fireside baritone, Late-night broadcast)..."
                           className="flex-1 px-2.5 py-1 bg-white border-2 border-[#111] text-xs font-medium"
                         />
                       </div>
@@ -907,7 +1153,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                 )}
               </div>
 
-              {/* HANGING YELLOW LANYARD ID CARD (MATCHING "LEILA" BADGE IN REFERENCE IMAGE) */}
+              {/* HANGING YELLOW LANYARD ID CARD WITH AI POP-ART PORTRAIT */}
               <div className="mt-3.5 flex flex-col sm:flex-row items-center gap-4 bg-badge-yellow border-[3px] border-[#111] rounded-2xl p-3.5 shadow-brutal-lg relative">
                 {/* Halftone Pop-Art Portrait Frame with Badge Slot */}
                 <div className="flex flex-col items-center shrink-0">
@@ -925,10 +1171,10 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                   <div className="bg-white border-2 border-[#111] px-3 py-1 text-center sm:text-left shadow-brutal-sm flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="font-mono-tech text-[10px] font-bold uppercase text-[#555]">
-                        ACTIVE CLUB ID BADGE · AUTHOR / NARRATOR
+                        RESIDENT PRESS CREDENTIAL · ACTIVE VOICE CAST
                       </div>
                       <div className="font-display-brutal text-base sm:text-lg uppercase text-[#111] truncate">
-                        Author:{' '}
+                        Editor:{' '}
                         {settings.useCustomAuthor && settings.customAuthorTrait
                           ? settings.customAuthorTrait
                           : activeAuthorProfile.name}{' '}
@@ -944,14 +1190,14 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
                     {activeAuthorProfile.sampleQuote}
                   </div>
 
-                  {/* 4 Preset Personality Buttons in a Single Clean 4-Column Row */}
+                  {/* 4 Preset Personality Buttons in a Clean 4-Column Row */}
                   <div className="mt-2.5 grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                     {(
                       [
-                        { id: 'homelander', label: '1. Homelander' },
-                        { id: 'taylor_swift', label: '2. Taylor Swift' },
-                        { id: 'deadpool', label: '3. Deadpool' },
-                        { id: 'gandalf', label: '4. Gandalf' },
+                        { id: 'homelander', label: 'Homelander' },
+                        { id: 'taylor_swift', label: 'Taylor Swift' },
+                        { id: 'deadpool', label: 'Deadpool' },
+                        { id: 'gandalf', label: 'Gandalf' },
                       ] as { id: PresetPersonalityId; label: string }[]
                     ).map((item) => {
                       const isCurrent =
@@ -986,7 +1232,7 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
           </div>
         </div>
 
-        {/* FULL CHAPTER-WISE READER & COMPACT AUDIOBOOK WORKSPACE BELOW THE FOLD */}
+        {/* FULL CHAPTER-WISE READER & STUDIO AUDIOBOOK WORKSPACE BELOW THE FOLD */}
         <div ref={readerSectionRef} className="mt-10">
           <ReaderWorkspace
             book={activeBook}
@@ -1007,21 +1253,23 @@ After recovering my Time Machine from the bronze doors of the Sphinx and escapin
       <footer className="mt-12 bg-[#111] text-neutral-300 border-t-[3px] border-[#111] px-6 py-4">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
           <span className="font-display-brutal text-[#F6C90E] tracking-tight">
-            THE READERS CLUB · PROPORTIONAL 30–40 PAGE CHAPTERWISE EDITIONS
+            THE READERS CLUB · LITERARY ARCHIVE &amp; AUDIO PRESS
           </span>
           <div className="flex items-center gap-3 font-mono-tech">
-            <span>1. Original</span>
+            <span>Original Archive</span>
             <span aria-hidden="true">·</span>
-            <span>2. Compact (30-40p)</span>
+            <span>Compact Edition</span>
             <span aria-hidden="true">·</span>
-            <span>3. Super Short (2-4p)</span>
+            <span>Executive Briefing</span>
             <span aria-hidden="true">·</span>
-            <span>4. Bullet</span>
+            <span>Key Takeaways</span>
             <span aria-hidden="true">·</span>
-            <span>5. Compact Audiobook</span>
+            <span>Studio Audiobook</span>
           </div>
         </div>
       </footer>
+
+      <OfflineIndicator />
     </div>
   );
 }

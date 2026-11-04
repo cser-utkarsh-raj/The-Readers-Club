@@ -4,6 +4,7 @@ import {
   calculateCompactPageAllocation,
   applyPersonaVoiceToParagraphs,
   buildBookFromExtractedText,
+  buildBookFromExternalCatalogItem,
   PERSONALITY_PROFILES,
 } from './bookLogic';
 
@@ -72,3 +73,28 @@ When the flagship finally cleared the breakwater, gale-force winds tested every 
   assert.ok(book.compactTotalPages >= 30 && book.compactTotalPages <= 40);
   assert.equal(book.superShortExecutiveSummary.executivePages.length, 3);
 });
+
+test('buildBookFromExternalCatalogItem preserves original cover poster URL and builds 6 chapters', () => {
+  const catalogItem = buildBookFromExternalCatalogItem(
+    {
+      id: 'gutendex-11',
+      title: 'Alice’s Adventures in Wonderland',
+      author: 'Lewis Carroll',
+      year: '1865',
+      genre: 'Fantasy Fiction',
+      coverUrl: 'https://www.gutenberg.org/cache/epub/11/pg11.cover.medium.jpg',
+      description: 'Alice falls down a rabbit hole into a fantastical subterranean world.',
+      sourceApi: 'gutendex',
+      pageCount: 200,
+    },
+    'taylor_swift'
+  );
+
+  assert.equal(
+    catalogItem.coverUrl,
+    'https://www.gutenberg.org/cache/epub/11/pg11.cover.medium.jpg'
+  );
+  assert.equal(catalogItem.chapters.length, 6);
+  assert.ok(catalogItem.compactTotalPages >= 30 && catalogItem.compactTotalPages <= 40);
+});
+

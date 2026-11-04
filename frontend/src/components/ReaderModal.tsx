@@ -10,7 +10,7 @@ import {
   PERSONALITY_PROFILES,
   applyPersonaVoiceToParagraphs,
 } from '../utils/bookLogic';
-import { PersonaPortraitSvg } from './TactileArt';
+import { BookPosterCover, PersonaPortraitSvg } from './TactileArt';
 import {
   BookOpen,
   FileText,
@@ -23,7 +23,6 @@ import {
   Play,
   SkipBack,
   SkipForward,
-  Check,
   ChevronLeft,
   ChevronRight,
   Sliders,
@@ -59,13 +58,13 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const [isAiRewriting, setIsAiRewriting] = useState(false);
   const [aiStatusBanner, setAiStatusBanner] = useState<string | null>(null);
 
-  // Audiobook Playback State (Strictly for Compact Version as requested)
+  // Audiobook Playback State
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isGeneratingTts, setIsGeneratingTts] = useState(false);
   const [activeAudioParagraphIdx, setActiveAudioParagraphIdx] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const [audioSourceLabel, setAudioSourceLabel] = useState<string>(
-    'Ready · Compact Edition Audio'
+    'Ready · Studio Audio Edition'
   );
 
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
@@ -135,7 +134,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     if (isAiRewriting) return;
     setIsAiRewriting(true);
     setAiStatusBanner(
-      `Summoning ${activeAuthorDisplayName} to rewrite ${currentChapter.title}...`
+      `Composing ${activeAuthorDisplayName} commentary for ${currentChapter.title}...`
     );
 
     const stylePrompt =
@@ -174,7 +173,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               : currentChapter.bulletPoints
           );
           setAiStatusBanner(
-            `Fresh Gemini 3.8 Flash chapter summary crafted by ${activeAuthorDisplayName}!`
+            `Fresh chapter edition composed by ${activeAuthorDisplayName}.`
           );
           setIsAiRewriting(false);
           return;
@@ -203,7 +202,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       rewrittenBullets
     );
     setAiStatusBanner(
-      `${activeAuthorDisplayName} Persona Edition applied to ${currentChapter.title}.`
+      `${activeAuthorDisplayName} Edition applied to ${currentChapter.title}.`
     );
     setIsAiRewriting(false);
   }
@@ -214,7 +213,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
     if (isPlayingAudio && typeof startIdx !== 'number') {
       stopAudioPlayback();
-      setAudioSourceLabel('Paused · Compact Edition Audio');
+      setAudioSourceLabel('Paused · Studio Audio Edition');
       return;
     }
 
@@ -247,14 +246,14 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         const data = await res.json();
         if (data.audioBase64) {
           const audio = new Audio(
-            `data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`
+            `data:${data.mimeType || 'audio/wav'};base64:${data.audioBase64}`
           );
           audio.playbackRate = playbackSpeed;
           audioElementRef.current = audio;
           setIsGeneratingTts(false);
           setIsPlayingAudio(true);
           setAudioSourceLabel(
-            `Playing Gemini 3.8 TTS (${activeNarratorDisplayName} · ${narratorProfile.ttsVoiceName})`
+            `Studio Voice (${activeNarratorDisplayName} · ${narratorProfile.ttsVoiceName})`
           );
 
           audio.onended = () => {
@@ -262,7 +261,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               handleToggleAudiobookPlayback(targetIdx + 1);
             } else {
               setIsPlayingAudio(false);
-              setAudioSourceLabel('Chapter Compact Audio Complete');
+              setAudioSourceLabel('Chapter Audio Complete');
             }
           };
 
@@ -287,7 +286,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           handleToggleAudiobookPlayback(targetIdx + 1);
         } else {
           setIsPlayingAudio(false);
-          setAudioSourceLabel('Chapter Compact Audio Complete');
+          setAudioSourceLabel('Chapter Audio Complete');
         }
       };
 
@@ -297,13 +296,13 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
       setIsPlayingAudio(true);
       setAudioSourceLabel(
-        `Narrating via ${activeNarratorDisplayName} Voice Engine (${playbackSpeed}x)`
+        `Narrated by ${activeNarratorDisplayName} (${playbackSpeed}x)`
       );
       window.speechSynthesis.speak(utterance);
     } else {
       setIsPlayingAudio(true);
       setAudioSourceLabel(
-        `Simulated ${activeNarratorDisplayName} Audio Stream (${playbackSpeed}x)`
+        `${activeNarratorDisplayName} Audio Stream (${playbackSpeed}x)`
       );
     }
   }
@@ -317,36 +316,36 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   }[] = [
     {
       id: 'original',
-      numberLabel: '1. ORIGINAL',
+      numberLabel: 'ORIGINAL',
       shortTitle: `${book.originalTotalPages}p Full Text`,
       badgeNote: 'Unabridged',
       icon: <BookOpen className="w-4 h-4" />,
     },
     {
       id: 'compact',
-      numberLabel: '2. COMPACT ★',
+      numberLabel: 'COMPACT',
       shortTitle: `${book.compactTotalPages}p Chapterwise`,
-      badgeNote: 'Main Goal',
+      badgeNote: 'Club Edition',
       icon: <FileText className="w-4 h-4" />,
     },
     {
       id: 'super_short',
-      numberLabel: '3. SUPER SHORT',
-      shortTitle: `${book.superShortPages}p Executive`,
-      badgeNote: '2-4p Brief',
+      numberLabel: 'EXECUTIVE',
+      shortTitle: `${book.superShortPages}p Briefing`,
+      badgeNote: 'Digest',
       icon: <Zap className="w-4 h-4" />,
     },
     {
       id: 'bullet',
-      numberLabel: '4. BULLET',
+      numberLabel: 'KEY POINTS',
       shortTitle: 'Chapter / Book',
       badgeNote: 'Takeaways',
       icon: <ListChecks className="w-4 h-4" />,
     },
     {
       id: 'audiobook',
-      numberLabel: '5. AUDIOBOOK',
-      shortTitle: 'Compact Audio',
+      numberLabel: 'AUDIOBOOK',
+      shortTitle: 'Studio Audio',
       badgeNote: 'Narrated',
       icon: <Headphones className="w-4 h-4" />,
     },
@@ -361,20 +360,34 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       aria-label="Active Book Reader Studio"
       className="bg-reader-paper border-[3px] border-[#111] shadow-brutal-lg rounded-none overflow-hidden flex flex-col"
     >
-      {/* Top Book Header Strip */}
+      {/* Top Book Header Strip with Original Book Poster */}
       <div
-        className="px-4 py-3.5 border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3"
+        className="px-4 py-3.5 border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-4"
         style={{ backgroundColor: book.coverColor, color: '#FFFFFF' }}
       >
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-xs font-mono-tech uppercase tracking-wider opacity-95">
-            <span>{book.genre}</span>
-            <span aria-hidden="true">·</span>
-            <span>{book.year}</span>
+        <div className="flex items-center gap-3.5 min-w-0">
+          <div className="w-12 h-16 sm:w-14 sm:h-20 border-2 border-white shadow-brutal-sm shrink-0 overflow-hidden bg-[#111]">
+            <BookPosterCover
+              title={book.title}
+              author={book.author}
+              coverUrl={book.coverUrl}
+              coverColor={book.coverColor}
+              coverAccent={book.coverAccent}
+            />
           </div>
-          <h2 className="font-display-brutal text-xl sm:text-2xl uppercase tracking-tight truncate">
-            {book.title} — {book.author}
-          </h2>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-xs font-mono-tech uppercase tracking-wider opacity-95">
+              <span>{book.genre}</span>
+              <span aria-hidden="true">·</span>
+              <span>{book.year}</span>
+            </div>
+            <h2 className="font-display-brutal text-xl sm:text-2xl uppercase tracking-tight truncate">
+              {book.title} — {book.author}
+            </h2>
+            <p className="text-xs text-white/85 truncate max-w-xl mt-0.5">
+              {book.tagline}
+            </p>
+          </div>
         </div>
 
         {/* Proportional Page Math Readout */}
@@ -386,7 +399,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       {/* 5 Summary Mode Selector Bar */}
       <div
         role="tablist"
-        aria-label="Summary Format Selector"
+        aria-label="Reading Format Selector"
         className="grid grid-cols-2 sm:grid-cols-5 border-b-[3px] border-[#111] bg-[#E5E5E5]"
       >
         {summaryModes.map((m) => {
@@ -423,7 +436,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       <div className="px-4 py-2.5 bg-[#ECECEC] border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono-tech font-bold uppercase text-[#111]">
-            Author Voice:
+            Editorial Voice:
           </span>
           {(['homelander', 'taylor_swift', 'deadpool', 'gandalf'] as PresetPersonalityId[]).map(
             (pid) => {
@@ -456,7 +469,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             className="px-2.5 py-1 border-2 border-[#111] bg-white hover:bg-[#F6C90E] text-[#111] font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap"
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Custom Persona</span>
+            <span>Voice Studio</span>
           </button>
         </div>
 
@@ -469,8 +482,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           <Sparkles className="w-3.5 h-3.5" />
           <span>
             {isAiRewriting
-              ? 'Summarizing Chapter...'
-              : `AI Rewrite as ${activeAuthorDisplayName}`}
+              ? 'Composing Chapter...'
+              : `Compose in ${activeAuthorDisplayName}'s Voice`}
           </span>
         </button>
       </div>
@@ -498,7 +511,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           <div>
             <div className="flex items-center justify-between pb-2 mb-2 border-b-2 border-[#111]">
               <span className="font-display-brutal text-xs uppercase tracking-wider">
-                CHAPTERWISE STRUCTURE ({book.chapters.length})
+                CHAPTER INDEX ({book.chapters.length})
               </span>
               <span className="font-mono-tech text-[11px] font-bold">
                 ORIG → COMPACT
@@ -548,12 +561,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           {/* Chapter Proportional Ratio Footnote */}
           <div className="mt-4 p-2.5 bg-white border-2 border-[#111] text-[11px] leading-relaxed">
             <div className="font-display-brutal uppercase text-[#E50914] text-xs">
-              Proportional 30–40p Architecture
+              Chapter-Preserving Condensation
             </div>
             <p className="mt-1 text-[#222]">
-              Instead of flattening a {book.originalTotalPages}-page book into a
-              shallow 2-page blurb, our <strong>Compact Mode</strong> preserves
-              every single chapter in a {book.compactTotalPages}-page edition.
+              Every chapter of the {book.originalTotalPages}-page volume is
+              preserved in sequence across a {book.compactTotalPages}-page
+              reading edition.
             </p>
           </div>
         </aside>
@@ -566,7 +579,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    MODE 1 · UNABRIDGED ORIGINAL EDITION
+                    UNABRIDGED ARCHIVE TEXT
                   </span>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
                     {currentChapter.title}
@@ -587,22 +600,22 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
           )}
 
-          {/* MODE 2: COMPACT (30-40 PAGE CHAPTERWISE GOAL) */}
+          {/* MODE 2: COMPACT EDITION */}
           {activeMode === 'compact' && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <div className="flex items-center gap-2 text-xs font-mono-tech font-bold text-[#0047FF]">
-                    <span>MODE 2 · COMPACT CHAPTERWISE EDITION (MAIN GOAL)</span>
+                    <span>COMPACT CHAPTERWISE EDITION</span>
                     <span aria-hidden="true">·</span>
-                    <span>BY {activeAuthorDisplayName.toUpperCase()}</span>
+                    <span>CURATED BY {activeAuthorDisplayName.toUpperCase()}</span>
                   </div>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
                     {currentChapter.title}
                   </h3>
                 </div>
                 <div className="font-mono-tech text-xs font-bold bg-[#F6C90E] text-[#111] border-2 border-[#111] px-2.5 py-1">
-                  {currentChapter.originalPages}p Condensed → {currentChapter.compactPages} Compact Pages
+                  {currentChapter.originalPages}p → {currentChapter.compactPages} Compact Pages
                 </div>
               </div>
 
@@ -613,10 +626,10 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-xs font-bold uppercase tracking-wide text-[#111]">
-                    Summarized by {activeAuthorDisplayName} ·{' '}
+                    Adapted by {activeAuthorDisplayName} ·{' '}
                     <span className="font-normal text-[#444]">
                       {settings.useCustomAuthor && settings.customAuthorTrait
-                        ? 'Custom Club Author Persona'
+                        ? 'Custom Club Persona'
                         : authorProfile.roleTitle}
                     </span>
                   </div>
@@ -630,7 +643,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                   className="px-3 py-1.5 bg-[#111] text-[#F6C90E] font-mono-tech text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0 hover:bg-[#333]"
                 >
                   <Headphones className="w-3.5 h-3.5" />
-                  <span>Listen Compact</span>
+                  <span>Listen Audio</span>
                 </button>
               </div>
 
@@ -650,7 +663,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                           Math.min(currentChapter.compactPages, idx * 2 + 1)}{' '}
                         OF {book.compactTotalPages}
                       </span>
-                      <span>CHAPTER {currentChapter.number} MOVEMENT {idx + 1}</span>
+                      <span>CHAPTER {currentChapter.number} · SECTION {idx + 1}</span>
                     </div>
                     <p>{para}</p>
                   </div>
@@ -659,16 +672,16 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
           )}
 
-          {/* MODE 3: SUPER SHORT (2-4 PAGE EXECUTIVE SUMMARY) */}
+          {/* MODE 3: EXECUTIVE SUMMARY */}
           {activeMode === 'super_short' && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    MODE 3 · SUPER SHORT EXECUTIVE SUMMARY (2–4 PAGES)
+                    EXECUTIVE BRIEFING EDITION
                   </span>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
-                    {book.title} — Complete {book.superShortPages}-Page Executive Briefing
+                    {book.title} — {book.superShortPages}-Page Executive Synthesis
                   </h3>
                 </div>
                 <span className="font-mono-tech text-xs font-bold bg-[#111] text-[#F6C90E] px-2.5 py-1">
@@ -693,7 +706,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                       className="p-4 bg-white border-2 border-[#111] font-editorial text-sm sm:text-base leading-relaxed"
                     >
                       <div className="font-mono-tech text-xs font-bold text-[#E50914] mb-1">
-                        EXECUTIVE PAGE 0{idx + 1} OF 0{book.superShortPages}
+                        BRIEFING FOLIO 0{idx + 1} OF 0{book.superShortPages}
                       </div>
                       <p>{pageText}</p>
                     </div>
@@ -703,18 +716,18 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
           )}
 
-          {/* MODE 4: BULLET POINTS (CHAPTER OR ENTIRE BOOK) */}
+          {/* MODE 4: KEY POINTS */}
           {activeMode === 'bullet' && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#0047FF]">
-                    MODE 4 · STRUCTURED BULLET POINT MATRIX
+                    STRUCTURED KEY TAKEAWAYS
                   </span>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
                     {bulletScope === 'chapter'
-                      ? `${currentChapter.title} — Chapter Bullets`
-                      : `${book.title} — Entire Book Master Bullets`}
+                      ? `${currentChapter.title} — Chapter Key Points`
+                      : `${book.title} — Complete Volume Key Points`}
                   </h3>
                 </div>
 
@@ -740,7 +753,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                         : 'text-[#111] hover:bg-[#EEE]'
                     }`}
                   >
-                    Entire Book ({book.chapters.length} Ch.)
+                    Full Volume ({book.chapters.length} Ch.)
                   </button>
                 </div>
               </div>
@@ -766,16 +779,16 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
           )}
 
-          {/* MODE 5: AUDIOBOOK (FOR COMPACT VERSION ONLY, NOT ORIGINAL) */}
+          {/* MODE 5: STUDIO AUDIOBOOK */}
           {activeMode === 'audiobook' && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
                 <div>
                   <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                    MODE 5 · COMPACT EDITION AUDIOBOOK DECK (NOT UNABRIDGED ORIGINAL)
+                    COMPACT EDITION AUDIOBOOK STUDIO
                   </span>
                   <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
-                    {currentChapter.title} ({currentChapter.compactPages}p Compact Audio)
+                    {currentChapter.title} ({currentChapter.compactPages}p Audio Edition)
                   </h3>
                 </div>
                 <span className="font-mono-tech text-xs font-bold bg-[#111] text-[#F6C90E] px-2.5 py-1">
@@ -792,7 +805,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                     </div>
                     <div>
                       <div className="text-xs font-mono-tech text-[#F6C90E] uppercase">
-                        COMPACT EDITION NARRATOR PERSONA
+                        STUDIO NARRATOR VOICE
                       </div>
                       <div className="font-display-brutal text-lg">
                         {activeNarratorDisplayName}

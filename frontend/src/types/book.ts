@@ -27,6 +27,7 @@ export interface PersonalityProfile {
   halftoneClass: string;
   accentHex: string;
   sampleQuote: string;
+  avatarUrl?: string;
 }
 
 export interface BookChapter {
@@ -38,9 +39,7 @@ export interface BookChapter {
   originalText: string[];
   compactText: string[];
   bulletPoints: string[];
-  /** Optional cached AI-rewritten compact paragraphs keyed by persona id */
   personaCompactCache?: Record<string, string[]>;
-  /** Optional cached AI-rewritten bullet points keyed by persona id */
   personaBulletCache?: Record<string, string[]>;
 }
 
@@ -50,8 +49,9 @@ export interface BookItem {
   author: string;
   year: string;
   genre: string;
-  sourceType: 'open_source' | 'uploaded';
-  fileFormat?: 'EPUB' | 'PDF' | 'TXT' | 'GUTENBERG';
+  sourceType: 'open_source' | 'uploaded' | 'gutendex' | 'google_books';
+  fileFormat?: 'EPUB' | 'PDF' | 'TXT' | 'ARCHIVE' | 'GUTENDEX' | 'GOOGLE BOOKS';
+  coverUrl?: string;
   coverColor: string;
   coverAccent: string;
   originalTotalPages: number;
@@ -67,6 +67,20 @@ export interface BookItem {
   chapters: BookChapter[];
 }
 
+export interface ExternalCatalogBook {
+  id: string;
+  title: string;
+  author: string;
+  year: string;
+  genre: string;
+  source?: 'gutendex' | 'google_books';
+  sourceApi?: 'gutendex' | 'google_books';
+  coverUrl: string;
+  description: string;
+  textUrl?: string;
+  pageCount?: number;
+}
+
 export interface ClubSettings {
   authorPersonality: PresetPersonalityId;
   narratorPersonality: PresetPersonalityId;
@@ -74,5 +88,5 @@ export interface ClubSettings {
   customNarratorTrait: string;
   useCustomAuthor: boolean;
   useCustomNarrator: boolean;
-  targetCompactRatio: number; // default ~0.18 (e.g., 200p -> 36p)
+  targetCompactRatio: number;
 }

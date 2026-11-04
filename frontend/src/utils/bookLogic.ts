@@ -1,6 +1,7 @@
 import {
   BookChapter,
   BookItem,
+  ExternalCatalogBook,
   PersonalityProfile,
   PresetPersonalityId,
 } from '../types/book';
@@ -9,10 +10,10 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
   homelander: {
     id: 'homelander',
     name: 'Homelander',
-    roleTitle: 'Apex Command Summarizer',
-    tagline: 'Supremely confident, theatrical superiority, razor-sharp authority',
+    roleTitle: 'Apex Command Critic',
+    tagline: 'Theatrical authority, ruthless power analysis & zero-tolerance clarity',
     authorStylePrompt:
-      'Summarize with Homelander’s theatrical, supremely self-assured, slightly condescending corporate-superhero authority. Address the readers as if you are doing them a monumental favor by distilling this peasant literature into pure perfection. Keep all chapter facts and philosophical depth intact.',
+      'Summarize with Homelander’s theatrical, supremely self-assured, slightly condescending corporate-superhero authority. Address the readers as if you are doing them a monumental favor by distilling this literature into pure perfection. Keep all chapter facts and philosophical depth intact.',
     narratorStylePrompt:
       'Commanding, polished, intense, dramatically poised voice with eerie calm and supreme authority',
     ttsVoiceName: 'Fenrir',
@@ -22,13 +23,13 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
     halftoneClass: 'bg-halftone-crimson',
     accentHex: '#E11D48',
     sampleQuote:
-      '"You’re welcome. I took 200 pages of mortal rambling and distilled it into 35 pages of pure, laser-focused perfection. Try to keep up."',
+      '"You’re welcome. I took two hundred pages of mortal rambling and distilled it into thirty-five pages of laser-focused perfection."',
   },
   taylor_swift: {
     id: 'taylor_swift',
     name: 'Taylor Swift',
-    roleTitle: 'Poetic & Professional Lyricist',
-    tagline: 'Poetic, emotionally resonant, razor-sharp storytelling & bridge-building',
+    roleTitle: 'Lyrical Narrative Architect',
+    tagline: 'Vivid imagery, emotional precision & golden narrative bridges',
     authorStylePrompt:
       'Summarize with Taylor Swift’s poetic and professional literary voice: vivid imagery, emotional precision, clever metaphors, and structured narrative bridges that connect every chapter’s turning point with grace and intellectual clarity.',
     narratorStylePrompt:
@@ -45,10 +46,10 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
   deadpool: {
     id: 'deadpool',
     name: 'Deadpool',
-    roleTitle: 'Fourth-Wall Sarcastic Wit',
-    tagline: 'Sarcastic, fourth-wall breaking, punchy & witty—never annoying',
+    roleTitle: 'Fourth-Wall Satirist',
+    tagline: 'Razor-sharp metafictional wit, trope-busting commentary & brisk pacing',
     authorStylePrompt:
-      'Summarize with Deadpool’s clever, sarcastic, fourth-wall-aware wit (sharp, self-aware, genuinely funny, never annoying or repetitive). Call out character blunders and plot tropes while delivering a rock-solid, crystal-clear chapter-by-chapter breakdown.',
+      'Summarize with Deadpool’s clever, sarcastic, fourth-wall-aware wit. Call out character blunders and plot tropes while delivering a rock-solid, crystal-clear chapter-by-chapter breakdown.',
     narratorStylePrompt:
       'Witty, dryly sarcastic, upbeat conversational narrator with crisp comic timing',
     ttsVoiceName: 'Puck',
@@ -63,10 +64,10 @@ export const PERSONALITY_PROFILES: Record<PresetPersonalityId, PersonalityProfil
   gandalf: {
     id: 'gandalf',
     name: 'Gandalf',
-    roleTitle: 'Classic Literary Loremaster',
-    tagline: 'The classic book reading experience—timeless, wise, fireside gravitas',
+    roleTitle: 'Fireside Loremaster',
+    tagline: 'Timeless scholarly gravitas, warm hearthside cadence & deep lore',
     authorStylePrompt:
-      'Summarize with Gandalf’s timeless, scholarly, warm fireside wisdom—the quintessential classic book reading experience. Elevate the prose with dignified cadence, deep philosophical insight, and reverent fidelity to the chapter structure.',
+      'Summarize with Gandalf’s timeless, scholarly, warm fireside wisdom. Elevate the prose with dignified cadence, deep philosophical insight, and reverent fidelity to the chapter structure.',
     narratorStylePrompt:
       'Deep, resonant, calm, wise classic literary narrator reading beside a warm hearth',
     ttsVoiceName: 'Charon',
@@ -347,3 +348,117 @@ export function buildBookFromExtractedText(
     chapters,
   };
 }
+
+/**
+ * Converts an ExternalCatalogBook fetched from Gutendex or Google Books API
+ * into a structured 5-mode BookItem with its original cover poster preserved.
+ */
+export function buildBookFromExternalCatalogItem(
+  item: ExternalCatalogBook,
+  personaId: PresetPersonalityId = 'gandalf'
+): BookItem {
+  const palette = [
+    { coverColor: '#1E293B', coverAccent: '#F6C90E' },
+    { coverColor: '#7F1D1D', coverAccent: '#FDE047' },
+    { coverColor: '#14532D', coverAccent: '#FEF08A' },
+    { coverColor: '#312E81', coverAccent: '#F97316' },
+    { coverColor: '#701A75', coverAccent: '#FACC15' },
+  ];
+  const colorPick = palette[Math.abs(item.title.length + item.author.length) % palette.length];
+
+  const basePages = item.pageCount && item.pageCount >= 150 && item.pageCount <= 260
+    ? item.pageCount
+    : 210;
+
+  const chapterWeights = [34, 36, 35, 36, 34, 35];
+  const scale = basePages / 210;
+  const origPagesList = chapterWeights.map((w) => Math.max(20, Math.round(w * scale)));
+  const allocation = calculateCompactPageAllocation(origPagesList, 0.175);
+
+  const summarySeed =
+    item.description && item.description.trim().length > 40
+      ? item.description.trim()
+      : `${item.title} by ${item.author} is a landmark work of ${item.genre.toLowerCase()} exploring human ambition, moral consequence, and the forces that shape society.`;
+
+  const movementTitles = [
+    `Chapter 1: Premise & Opening World of ${item.title}`,
+    `Chapter 2: Rising Tensions & Catalyst`,
+    `Chapter 3: The Crucible of Conflict`,
+    `Chapter 4: Philosophical & Narrative Turning Point`,
+    `Chapter 5: Convergence & Climax`,
+    `Chapter 6: Resolution & Enduring Legacy`,
+  ];
+
+  const chapters: BookChapter[] = movementTitles.map((chTitle, idx) => {
+    const origP = origPagesList[idx];
+    const compP = allocation.chapterCompactPages[idx];
+
+    const originalText = [
+      `${summarySeed} In this movement (${chTitle}), ${item.author} establishes the foundational stakes and draws the reader into the central dramatic architecture of the work.`,
+      `Across these ${origP} pages of the unabridged edition, key characters and arguments are tested against the social, historical, and psychological pressures of ${item.genre.toLowerCase()}.`,
+      `Every detail in this section builds toward the next structural movement, reinforcing why ${item.title} remains an essential volume in world literature.`,
+    ];
+
+    const compactBase = [
+      `${chTitle} distills ${origP} original pages into ${compP} proportional pages: ${summarySeed.slice(0, 260)}`,
+      `${item.author} advances the central conflict by contrasting appearances against underlying motives, sharpening the thematic focus of the work.`,
+      `The movement concludes by locking the narrative trajectory into place for the chapters that follow.`,
+    ];
+
+    const compactText = applyPersonaVoiceToParagraphs(
+      compactBase,
+      personaId,
+      chTitle
+    );
+
+    const bulletPoints = [
+      `Core Focus: ${chTitle.replace(/^Chapter \d+:\s*/, '')} anchors the narrative arc of ${item.title}.`,
+      `Thematic Weight: ${item.author} examines the tension between individual agency and systemic circumstance.`,
+      `Structural Progression: Condenses ${origP} unabridged pages into ${compP} focused compact pages.`,
+    ];
+
+    return {
+      id: `${item.id}-ch-${idx + 1}`,
+      number: idx + 1,
+      title: chTitle,
+      originalPages: origP,
+      compactPages: compP,
+      originalText,
+      compactText,
+      bulletPoints,
+    };
+  });
+
+  const masterBookBullets = chapters.map(
+    (c) => `${c.title} (${c.originalPages}p → ${c.compactPages}p): ${c.bulletPoints[0]}`
+  );
+
+  return {
+    id: item.id,
+    title: item.title,
+    author: item.author,
+    year: item.year || 'Classic Edition',
+    genre: item.genre || 'Literary Archive',
+    sourceType: 'open_source',
+    fileFormat: item.sourceApi === 'gutendex' ? 'GUTENDEX' : 'GOOGLE BOOKS',
+    coverUrl: item.coverUrl,
+    coverColor: colorPick.coverColor,
+    coverAccent: colorPick.coverAccent,
+    originalTotalPages: allocation.totalOriginal,
+    compactTotalPages: allocation.totalCompact,
+    superShortPages: 3,
+    tagline: summarySeed.slice(0, 160),
+    superShortExecutiveSummary: {
+      thesis: `${item.title} by ${item.author} (${item.year}) is presented here in a proportional ${allocation.totalCompact}-page chapter-wise edition alongside a 3-page executive briefing.`,
+      executivePages: [
+        `Page 1 — Foundation & Context: ${summarySeed}`,
+        `Page 2 — Structural Arc: Across six distinct chapters, ${item.author} develops the central themes of ${item.genre.toLowerCase()} with escalating precision and psychological depth.`,
+        `Page 3 — Synthesis & Legacy: The resolution ties together the opening premise and enduring cultural impact of ${item.title}.`,
+      ],
+      coreTakeaways: masterBookBullets.slice(0, 4),
+    },
+    masterBookBullets,
+    chapters,
+  };
+}
+
