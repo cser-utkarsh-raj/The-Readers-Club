@@ -122,6 +122,14 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const [selectedChapterIdx, setSelectedChapterIdx] =
     useState<number>(initialChapterIdx);
   const [bulletScope, setBulletScope] = useState<BulletScope>('chapter');
+  const [focusMode, setFocusMode] = useState(false);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setFocusMode(false); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [focusMode]);
   const [isAiRewriting, setIsAiRewriting] = useState(false);
   const [isBatchCompressing, setIsBatchCompressing] = useState(false);
   const [aiStatusBanner, setAiStatusBanner] = useState<string | null>(null);
@@ -931,11 +939,20 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   return (
     <section
       aria-label="Book Reader"
-      className="bg-reader-paper border-[3px] border-[#111] shadow-brutal-lg rounded-none overflow-hidden flex flex-col"
+      data-reading-theme={settings.readingTheme || 'paper'}
+      className={"reader-workspace reader-theme-" + (settings.readingTheme || 'paper') + " bg-reader-paper border-[3px] border-[#111] shadow-brutal-lg rounded-none overflow-hidden flex flex-col " + (focusMode ? 'reader-focus-mode' : '')}
     >
       {/* Top Back & Attribution Bar */}
       <div className="px-4 py-2.5 bg-[#111] text-white border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex gap-1" role="group" aria-label="Reading theme">
+            {(['paper', 'sepia', 'evening'] as const).map((theme) => (
+              <button key={theme} type="button" aria-pressed={(settings.readingTheme || 'paper') === theme} onClick={() => onUpdateSettings({ readingTheme: theme })} className="px-2 py-1 border border-white bg-neutral-800 text-white font-mono-tech text-[10px] uppercase">
+                {theme}
+              </button>
+            ))}
+          </div>
+          <button type="button" aria-pressed={focusMode} onClick={() => setFocusMode((value) => !value)} className="px-2 py-1 bg-[#0047FF] text-white border border-white font-mono-tech text-[10px] uppercase">{focusMode ? 'Exit focus (Esc)' : 'Focus reader'}</button>
           {onBackToCatalog && (
             <button
               type="button"

@@ -266,7 +266,10 @@ export interface ScoredBookRecommendation {
   isColdStart?: boolean;
 }
 
+export type ReadingTheme = 'paper' | 'sepia' | 'evening';
+
 export interface ClubSettings {
+  readingTheme?: ReadingTheme;
   authorPersonality: PresetPersonalityId;
   narratorPersonality: PresetPersonalityId;
   defaultSummaryMode?: SummaryMode;
