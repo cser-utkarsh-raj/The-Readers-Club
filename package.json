@@ -17,7 +17,7 @@
     "preview": "vite preview --config frontend/vite.config.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "tsx --test frontend/src/utils/bookLogic.test.ts backend/src/server.test.ts",
+    "test": "tsx --test frontend/src/utils/bookLogic.test.ts backend/src/server.test.ts tests/fidelity/textRank.test.ts",
     "test:e2e": "tsx scripts/e2e-verify.ts",
     "validate:catalog": "tsx scripts/validate-catalog.ts"
   },
