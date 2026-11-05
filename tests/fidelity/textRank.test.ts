@@ -42,7 +42,7 @@ test('selection respects the budget and restores chronological order', () => {
     { index: 1, text: 'Second important sentence.', score: 0.8 },
     { index: 2, text: 'Third.', score: 0.2 },
   ];
-  const selected = selectRankedSentences(ranked, 30);
+  const selected = selectRankedSentences(ranked, 36);
   assert.deepEqual(selected.map((item) => item.index), [1, 2]);
-  assert.ok(selected.reduce((sum, item) => sum + item.text.length, 0) + selected.length - 1 <= 30);
+  assert.ok(selected.reduce((sum, item) => sum + item.text.length, 0) + selected.length - 1 <= 36);
 });
