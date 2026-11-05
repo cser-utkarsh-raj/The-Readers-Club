@@ -36,7 +36,7 @@ export const MascotChatWidget: React.FC<MascotChatWidgetProps> = ({
   settings,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [taskTier, setTaskTier] = useState<MascotTaskTier>('complex');
+  const [taskTier, setTaskTier] = useState<MascotTaskTier>('fast');
   const [inputMessage, setInputMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
 
@@ -63,7 +63,7 @@ export const MascotChatWidget: React.FC<MascotChatWidgetProps> = ({
         id: 'mascot-welcome',
         role: 'model',
         text: `Welcome to The Readers Club! I’m Mascot, your literary companion—currently channeling ${activePersona.name}. Ask me anything about "${activeBook.title}", dissect a chapter’s themes, or ask what to read next!`,
-        modelUsed: 'gemini-4-argon',
+        modelUsed: 'gemini-3.1-flash-lite',
         personaId: settings.authorPersonality,
         timestamp: new Date().toISOString(),
       },
