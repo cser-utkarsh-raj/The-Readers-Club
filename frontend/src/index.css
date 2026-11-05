@@ -115,3 +115,14 @@
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+
+
+/* Reader themes: the preference is persisted with ClubSettings. */
+.reader-theme-paper { --reader-surface:#fbf8f1; --reader-ink:#24211d; }
+.reader-theme-sepia { --reader-surface:#efe2c7; --reader-ink:#493725; }
+.reader-theme-evening { --reader-surface:#24272b; --reader-ink:#e8e1d5; }
+.reader-workspace.reader-theme-paper,.reader-workspace.reader-theme-sepia,.reader-workspace.reader-theme-evening { background-color:var(--reader-surface); color:var(--reader-ink); }
+.reader-workspace.reader-theme-paper .bg-reader-paper,.reader-workspace.reader-theme-sepia .bg-reader-paper,.reader-workspace.reader-theme-evening .bg-reader-paper { background-color:var(--reader-surface) !important; color:var(--reader-ink); }
+.reader-workspace.reader-theme-evening .bg-white { background-color:#30343a !important; color:var(--reader-ink) !important; }
+.reader-workspace.reader-theme-evening [class*="text-[#111]"],.reader-workspace.reader-theme-evening [class*="text-[#222]"],.reader-workspace.reader-theme-evening [class*="text-[#444]"] { color:var(--reader-ink) !important; }
+.reader-workspace.reader-theme-sepia [class*="text-[#111]"],.reader-workspace.reader-theme-sepia [class*="text-[#222]"] { color:var(--reader-ink) !important; }
