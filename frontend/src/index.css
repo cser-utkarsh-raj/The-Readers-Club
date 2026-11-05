@@ -126,3 +126,7 @@
 .reader-workspace.reader-theme-evening .bg-white { background-color:#30343a !important; color:var(--reader-ink) !important; }
 .reader-workspace.reader-theme-evening [class*="text-[#111]"],.reader-workspace.reader-theme-evening [class*="text-[#222]"],.reader-workspace.reader-theme-evening [class*="text-[#444]"] { color:var(--reader-ink) !important; }
 .reader-workspace.reader-theme-sepia [class*="text-[#111]"],.reader-workspace.reader-theme-sepia [class*="text-[#222]"] { color:var(--reader-ink) !important; }
+
+.reader-focus-mode { position:fixed; inset:0; z-index:100; width:100vw; height:100dvh; max-height:100dvh; overflow-y:auto; border:0 !important; border-radius:0 !important; box-shadow:none !important; padding-bottom:env(safe-area-inset-bottom); }
+.reader-focus-mode > :first-child { position:sticky; top:0; z-index:5; }
+@media (max-width:640px) { .reader-focus-mode { padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); } }
