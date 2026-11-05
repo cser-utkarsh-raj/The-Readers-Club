@@ -19,7 +19,8 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test frontend/src/utils/bookLogic.test.ts backend/src/server.test.ts tests/fidelity/textRank.test.ts tests/fidelity/storyMemory.test.ts tests/fidelity/verification.test.ts",
     "test:e2e": "tsx scripts/e2e-verify.ts",
-    "validate:catalog": "tsx scripts/validate-catalog.ts"
+    "validate:catalog": "tsx scripts/validate-catalog.ts",
+    "validate:fidelity": "tsx --test tests/fidelity/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.32.0",
