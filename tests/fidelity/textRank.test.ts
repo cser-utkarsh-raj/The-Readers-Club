@@ -4,7 +4,7 @@ import {
   rankSentencesWithTextRank,
   selectRankedSentences,
   splitIntoSentences,
-} from '../frontend/src/utils/fidelity/textRank';
+} from '../../frontend/src/utils/fidelity/textRank';
 
 test('sentence splitting preserves punctuation and handles common abbreviations', () => {
   assert.deepEqual(
