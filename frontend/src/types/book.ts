@@ -78,6 +78,25 @@ export interface TtsAudioChunk {
   errorMessage?: string;
 }
 
+export interface SummaryFidelityMetadata {
+  pipelineVersion: string;
+  promptVersion: string;
+  status: 'verified' | 'needs_review' | 'failed';
+  sourceHash: string;
+  evidenceCoverage: {
+    plot: number;
+    characters: number;
+    worldBuilding: number;
+    chronology: number;
+    themes: number;
+  };
+  unsupportedClaims: number;
+  omittedCriticalItems: string[];
+  verificationModel?: string;
+  verifiedAt?: string;
+  reviewReasons?: string[];
+}
+
 export interface ChapterSummaryMetadata {
   status: SummaryGenerationStatus;
   source?: 'ai' | 'cache' | 'curated' | 'none';
