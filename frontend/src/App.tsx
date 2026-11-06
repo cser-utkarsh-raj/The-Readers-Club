@@ -347,7 +347,7 @@ export default function App() {
           b.availabilityStatus === 'external_source_available' ||
           Boolean(b.gutenbergId)
       )
-      .slice(0, 12);
+      .slice(0, 18);
   }, [combinedArchivePool]);
 
   async function fetchLiveArchivePage(
@@ -360,19 +360,31 @@ export default function App() {
     const topicParam = catObj?.apiTopic || '';
 
     try {
-      const params = new URLSearchParams();
-      if (queryText.trim()) params.set('q', queryText.trim());
-      if (topicParam) params.set('topic', topicParam);
-      params.set('page', String(pageNum));
-
-      const resp = await fetch(`/api/books/discover?${params.toString()}`);
-      if (resp.ok) {
+      const fetchSinglePage = async (p: number): Promise<ExternalCatalogBook[]> => {
+        const params = new URLSearchParams();
+        if (queryText.trim()) params.set('q', queryText.trim());
+        if (topicParam) params.set('topic', topicParam);
+        params.set('page', String(p));
+        const resp = await fetch(`/api/books/discover?${params.toString()}`);
+        if (!resp.ok) return [];
         const data = await resp.json();
-        if (Array.isArray(data.books) && data.books.length > 0) {
-          setLiveApiBooks((prev) =>
-            pageNum === 1 ? data.books : [...prev, ...data.books]
-          );
-        }
+        return Array.isArray(data.books) ? data.books : [];
+      };
+
+      const pagesToFetch = pageNum === 1 ? [1, 2] : [pageNum + 1];
+      const batches = await Promise.all(pagesToFetch.map(fetchSinglePage));
+      const mergedBatch = batches.flat();
+
+      if (mergedBatch.length > 0) {
+        setLiveApiBooks((prev) => {
+          const combined = pageNum === 1 ? mergedBatch : [...prev, ...mergedBatch];
+          const seen = new Set<string>();
+          return combined.filter((item) => {
+            if (!item?.id || seen.has(item.id)) return false;
+            seen.add(item.id);
+            return true;
+          });
+        });
       }
     } catch {
       // Covered by local catalog seed
@@ -1819,6 +1831,28 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
                 })}
               </div>
             )}
+
+            <div className="mt-6 pt-4 border-t-2 border-[#111] flex flex-wrap items-center justify-between gap-3">
+              <span className="font-mono-tech text-xs text-[#444]">
+                Showing {filteredArchiveBooks.length} volumes from Project Gutenberg, OpenLibrary & Google Books APIs
+              </span>
+              <button
+                type="button"
+                disabled={isSearchingApi}
+                onClick={() => setCatalogPage((p) => p + 1)}
+                data-testid="load-more-api-books-button"
+                className="px-4 py-2 bg-[#F6C90E] border-2 border-[#111] shadow-brutal-sm font-mono-tech text-xs font-extrabold uppercase cursor-pointer hover:bg-[#eab308] disabled:opacity-50 flex items-center gap-2"
+              >
+                {isSearchingApi ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Fetching More Volumes from API...</span>
+                  </>
+                ) : (
+                  <span>+ Load More Books from Archive API (Batch #{catalogPage + 1})</span>
+                )}
+              </button>
+            </div>
           </div>
         </main>
       )}

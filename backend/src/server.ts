@@ -1028,7 +1028,7 @@ ${passageText}`;
     }
   });
 
-  // 3. Live Paginated Book Discovery Endpoint (Gutendex Public Domain Full Text + Google Books Metadata Discovery)
+  // 3. Live Paginated Book Discovery Endpoint (Gutendex Public Domain Full Text + Google Books + OpenLibrary Discovery)
   app.get('/api/books/discover', async (req, res) => {
     const query = String(req.query.q || '').trim();
     const topic = String(req.query.topic || '').trim();
@@ -1058,96 +1058,100 @@ ${passageText}`;
       pageCount?: number;
     }> = [];
 
+    const parseGutendexPage = async (gutendexPage: number) => {
+      const params = new URLSearchParams();
+      if (query) params.set('search', query);
+      if (topic) params.set('topic', topic);
+      params.set('page', String(gutendexPage));
+
+      const gutendexUrl = `https://gutendex.com/books?${params.toString()}`;
+      const r = await fetchWithTimeout(gutendexUrl, 5000, fetchFn);
+      if (!r.ok) return;
+      const data = (await r.json()) as {
+        count?: number;
+        results?: Array<{
+          id: number;
+          title: string;
+          authors?: Array<{ name: string; birth_year?: number | null }>;
+          subjects?: string[];
+          bookshelves?: string[];
+          Summaries?: string[];
+          summaries?: string[];
+          download_count?: number;
+          formats?: Record<string, string>;
+        }>;
+      };
+      if (typeof data.count === 'number' && data.count > 0) {
+        totalAvailableCount = data.count;
+      }
+      for (const item of data.results || []) {
+        const formats = item.formats || {};
+        const hasPlainText = Object.keys(formats).some((k) =>
+          k.startsWith('text/plain')
+        );
+        const cover =
+          formats['image/jpeg'] ||
+          `https://www.gutenberg.org/cache/epub/${item.id}/pg${item.id}.cover.medium.jpg`;
+        const rawAuthor = item.authors?.[0]?.name || 'Public Domain Author';
+        const formattedAuthor = rawAuthor.includes(',')
+          ? rawAuthor
+              .split(',')
+              .reverse()
+              .map((s) => s.trim())
+              .join(' ')
+          : rawAuthor;
+        const summaryList = item.summaries || item.Summaries || [];
+        const cleanSubjects = (item.subjects || [])
+          .map((s) => s.split('--')[0].trim())
+          .filter(Boolean);
+        const primaryGenre = cleanSubjects[0] || topic || 'Classic Literature';
+        const dlScore = item.download_count
+          ? Math.min(
+              99,
+              Math.max(80, Math.round(78 + Math.log10(item.download_count + 1) * 4.5))
+            )
+          : 86;
+
+        results.push({
+          id: `gutendex-${item.id}`,
+          gutenbergId: item.id,
+          title: item.title.split(';')[0].trim(),
+          author: formattedAuthor,
+          year: item.authors?.[0]?.birth_year
+            ? `${item.authors[0].birth_year + 35}`
+            : 'Public Domain',
+          genre: primaryGenre,
+          subgenres: cleanSubjects.slice(0, 3),
+          mlTags: [
+            primaryGenre.toLowerCase(),
+            formattedAuthor.toLowerCase(),
+            ...cleanSubjects.slice(0, 3).map((s) => s.toLowerCase()),
+          ],
+          trendingScore: dlScore,
+          coverUrl: cover,
+          description:
+            summaryList[0] ||
+            `${item.title} by ${formattedAuthor}. Public-domain edition indexed via Project Gutenberg (#${item.id}).`,
+          sourceApi: 'gutendex',
+          availabilityStatus: hasPlainText
+            ? 'external_source_available'
+            : 'metadata_only',
+          sourceAttribution: `Project Gutenberg Public Domain Archive (eBook #${item.id})`,
+        });
+      }
+    };
+
+    const searchTerm =
+      [query, topic].filter(Boolean).join(' ') || 'classic literature masterpiece';
+
     await Promise.allSettled([
+      parseGutendexPage(page * 2 - 1),
+      parseGutendexPage(page * 2),
       (async () => {
-        const params = new URLSearchParams();
-        if (query) params.set('search', query);
-        if (topic) params.set('topic', topic);
-        params.set('page', String(page));
-
-        const gutendexUrl = `https://gutendex.com/books?${params.toString()}`;
-        const r = await fetchWithTimeout(gutendexUrl, 5000, fetchFn);
-        if (!r.ok) return;
-        const data = (await r.json()) as {
-          count?: number;
-          results?: Array<{
-            id: number;
-            title: string;
-            authors?: Array<{ name: string; birth_year?: number | null }>;
-            subjects?: string[];
-            bookshelves?: string[];
-            Summaries?: string[];
-            summaries?: string[];
-            download_count?: number;
-            formats?: Record<string, string>;
-          }>;
-        };
-        if (typeof data.count === 'number' && data.count > 0) {
-          totalAvailableCount = data.count;
-        }
-        for (const item of data.results || []) {
-          const formats = item.formats || {};
-          const hasPlainText = Object.keys(formats).some((k) =>
-            k.startsWith('text/plain')
-          );
-          const cover =
-            formats['image/jpeg'] ||
-            `https://www.gutenberg.org/cache/epub/${item.id}/pg${item.id}.cover.medium.jpg`;
-          const rawAuthor = item.authors?.[0]?.name || 'Public Domain Author';
-          const formattedAuthor = rawAuthor.includes(',')
-            ? rawAuthor
-                .split(',')
-                .reverse()
-                .map((s) => s.trim())
-                .join(' ')
-            : rawAuthor;
-          const summaryList = item.summaries || item.Summaries || [];
-          const cleanSubjects = (item.subjects || [])
-            .map((s) => s.split('--')[0].trim())
-            .filter(Boolean);
-          const primaryGenre = cleanSubjects[0] || topic || 'Classic Literature';
-          const dlScore = item.download_count
-            ? Math.min(
-                99,
-                Math.max(80, Math.round(78 + Math.log10(item.download_count + 1) * 4.5))
-              )
-            : 86;
-
-          results.push({
-            id: `gutendex-${item.id}`,
-            gutenbergId: item.id,
-            title: item.title.split(';')[0].trim(),
-            author: formattedAuthor,
-            year: item.authors?.[0]?.birth_year
-              ? `${item.authors[0].birth_year + 35}`
-              : 'Public Domain',
-            genre: primaryGenre,
-            subgenres: cleanSubjects.slice(0, 3),
-            mlTags: [
-              primaryGenre.toLowerCase(),
-              formattedAuthor.toLowerCase(),
-              ...cleanSubjects.slice(0, 3).map((s) => s.toLowerCase()),
-            ],
-            trendingScore: dlScore,
-            coverUrl: cover,
-            description:
-              summaryList[0] ||
-              `${item.title} by ${formattedAuthor}. Public-domain edition indexed via Project Gutenberg (#${item.id}).`,
-            sourceApi: 'gutendex',
-            availabilityStatus: hasPlainText
-              ? 'external_source_available'
-              : 'metadata_only',
-            sourceAttribution: `Project Gutenberg Public Domain Archive (eBook #${item.id})`,
-          });
-        }
-      })(),
-      (async () => {
-        const searchTerm =
-          [query, topic].filter(Boolean).join(' ') || 'classic literature';
-        const startIndex = (page - 1) * 12;
+        const startIndex = (page - 1) * 36;
         const gbUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(
           searchTerm
-        )}&startIndex=${startIndex}&maxResults=12&printType=books`;
+        )}&startIndex=${startIndex}&maxResults=36&printType=books`;
         const r = await fetchWithTimeout(gbUrl, 5000, fetchFn);
         if (!r.ok) return;
         const data = (await r.json()) as {
@@ -1203,12 +1207,76 @@ ${passageText}`;
           });
         }
       })(),
+      (async () => {
+        const olUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(
+          searchTerm
+        )}&page=${page}&limit=24`;
+        const r = await fetchWithTimeout(olUrl, 5000, fetchFn);
+        if (!r.ok) return;
+        const data = (await r.json()) as {
+          docs?: Array<{
+            key?: string;
+            title?: string;
+            author_name?: string[];
+            first_publish_year?: number;
+            subject?: string[];
+            cover_i?: number;
+            id_project_gutenberg?: string[];
+            number_of_pages_median?: number;
+          }>;
+        };
+        for (const doc of data.docs || []) {
+          if (!doc.title || !doc.cover_i) continue;
+          const pgIdRaw = doc.id_project_gutenberg?.[0];
+          const pgId = pgIdRaw ? Number(pgIdRaw) : undefined;
+          const hasGutenberg = Boolean(pgId && !Number.isNaN(pgId) && pgId > 0);
+          const authorName = doc.author_name?.[0] || 'Archive Author';
+          const primaryGenre = doc.subject?.[0] || topic || 'World Literature';
+          const cleanKey = (doc.key || doc.title).replace(/[^a-zA-Z0-9_-]/g, '');
+
+          results.push({
+            id: hasGutenberg ? `gutendex-${pgId}` : `openlib-${cleanKey}`,
+            gutenbergId: hasGutenberg ? pgId : undefined,
+            title: doc.title,
+            author: authorName,
+            year: doc.first_publish_year ? String(doc.first_publish_year) : 'Archive',
+            genre: primaryGenre,
+            subgenres: (doc.subject || [primaryGenre]).slice(0, 3),
+            mlTags: [
+              primaryGenre.toLowerCase(),
+              authorName.toLowerCase(),
+            ],
+            trendingScore: hasGutenberg ? 89 : 83,
+            coverUrl: `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`,
+            description: hasGutenberg
+              ? `${doc.title} by ${authorName}. Full-text edition cross-indexed via Project Gutenberg (#${pgId}).`
+              : `${doc.title} by ${authorName}. OpenLibrary catalog edition.`,
+            sourceApi: hasGutenberg ? 'gutendex' : 'google_books',
+            availabilityStatus: hasGutenberg
+              ? 'external_source_available'
+              : 'metadata_only',
+            sourceAttribution: hasGutenberg
+              ? `Project Gutenberg Public Domain Archive (eBook #${pgId})`
+              : 'OpenLibrary & Google Books Discovery Catalog',
+            pageCount: doc.number_of_pages_median,
+          });
+        }
+      })(),
     ]);
+
+    const seenKeys = new Set<string>();
+    const dedupedResults = results.filter((item) => {
+      const normKey = `${item.title.toLowerCase().trim()}::${item.author.toLowerCase().trim()}`;
+      if (seenKeys.has(item.id) || seenKeys.has(normKey)) return false;
+      seenKeys.add(item.id);
+      seenKeys.add(normKey);
+      return true;
+    });
 
     return res.json({
       totalAvailableCount,
       page,
-      books: results,
+      books: dedupedResults,
     });
   });
 

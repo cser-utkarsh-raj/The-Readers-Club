@@ -227,6 +227,13 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const ttsSessionIdRef = useRef<number>(0);
   const ttsAbortControllerRef = useRef<AbortController | null>(null);
   const summaryAbortControllerRef = useRef<AbortController | null>(null);
+  const lookaheadAbortControllerRef = useRef<AbortController | null>(null);
+  const [smartLookaheadBookId, setSmartLookaheadBookId] = useState<
+    string | null
+  >(null);
+  const [lookaheadChapterNum, setLookaheadChapterNum] = useState<number | null>(
+    null
+  );
   ttsChunksRef.current = ttsChunks;
 
   const activeTheme: ReadingTheme = settings.readingTheme || 'paper';
@@ -530,6 +537,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     setConfirmOverwriteChapterId(null);
     summaryAbortControllerRef.current?.abort();
     summaryAbortControllerRef.current = null;
+    lookaheadAbortControllerRef.current?.abort();
+    lookaheadAbortControllerRef.current = null;
+    setLookaheadChapterNum(null);
     stopAndCleanupAudio(true);
 
     if (
@@ -545,6 +555,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     return () => {
       summaryAbortControllerRef.current?.abort();
       summaryAbortControllerRef.current = null;
+      lookaheadAbortControllerRef.current?.abort();
+      lookaheadAbortControllerRef.current = null;
       stopAndCleanupAudio(true);
     };
   }, []);
@@ -666,8 +678,10 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
   async function compressSpecificChapter(
     targetChapter: BookChapter,
-    bypassClientCache = false
+    bypassClientCache = false,
+    options?: { silent?: boolean; signal?: AbortSignal }
   ): Promise<boolean> {
+    const isSilent = Boolean(options?.silent);
     const stylePrompt =
       settings.useCustomAuthor && settings.customAuthorTrait.trim()
         ? `Summarize with the personality of: ${settings.customAuthorTrait.trim()}. Keep all chapter facts, names, and narrative chronology intact.`
@@ -710,9 +724,14 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     }
 
     // 2. Request genuine AI summary from backend with AbortController support
-    summaryAbortControllerRef.current?.abort();
-    const controller = new AbortController();
-    summaryAbortControllerRef.current = controller;
+    let activeSignal = options?.signal;
+    let localController: AbortController | null = null;
+    if (!activeSignal) {
+      summaryAbortControllerRef.current?.abort();
+      localController = new AbortController();
+      summaryAbortControllerRef.current = localController;
+      activeSignal = localController.signal;
+    }
 
     try {
       const response = await fetch('/api/summarize', {
@@ -733,10 +752,10 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
           authorStylePrompt: stylePrompt,
           contentHash: chapterContentHash,
         }),
-        signal: controller.signal,
+        signal: activeSignal,
       });
 
-      if (controller.signal.aborted) {
+      if (activeSignal.aborted) {
         return false;
       }
 
@@ -768,6 +787,10 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         return true;
       }
 
+      if (isSilent) {
+        return false;
+      }
+
       // Honest failure handling: NEVER mark chapter as compressed or substitute fake AI text
       const errorMsg =
         data?.message ||
@@ -778,9 +801,12 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       return false;
     } catch (err: unknown) {
       if (
-        controller.signal.aborted ||
+        activeSignal.aborted ||
         (err instanceof Error && err.name === 'AbortError')
       ) {
+        return false;
+      }
+      if (isSilent) {
         return false;
       }
       const errorMsg =
@@ -792,6 +818,67 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       return false;
     }
   }
+
+  // Smart Rolling Lookahead: Once the user initiates summarization on a book,
+  // automatically pre-summarize the next 3 chapters ahead of the active chapter in the background
+  // without burning tokens on the entire book at once.
+  const LOOKAHEAD_CHAPTER_COUNT = 3;
+  useEffect(() => {
+    if (
+      smartLookaheadBookId !== book.id ||
+      isAiRewriting ||
+      isBatchCompressing ||
+      lookaheadChapterNum !== null
+    ) {
+      return;
+    }
+
+    const windowSlice = book.chapters.slice(
+      selectedChapterIdx + 1,
+      selectedChapterIdx + 1 + LOOKAHEAD_CHAPTER_COUNT
+    );
+    const nextUncompressed = windowSlice.find(
+      (ch) =>
+        (!isChapterCompressed(ch) ||
+          !ch.personaCompactCache?.[personaCacheKey]?.length) &&
+        ch.summaryStatus !== 'failed'
+    );
+
+    if (!nextUncompressed) {
+      return;
+    }
+
+    const controller = new AbortController();
+    lookaheadAbortControllerRef.current = controller;
+    setLookaheadChapterNum(nextUncompressed.number);
+
+    void (async () => {
+      const ok = await compressSpecificChapter(nextUncompressed, false, {
+        silent: true,
+        signal: controller.signal,
+      });
+      if (!controller.signal.aborted) {
+        setLookaheadChapterNum(null);
+        if (!ok) {
+          // Pause background lookahead if backend is offline or rate-limited
+          setSmartLookaheadBookId(null);
+        }
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [
+    smartLookaheadBookId,
+    book.id,
+    book.chapters,
+    selectedChapterIdx,
+    isAiRewriting,
+    isBatchCompressing,
+    lookaheadChapterNum,
+    personaCacheKey,
+  ]);
 
   async function handleCompressCurrentChapter(forceRegenerate = false) {
     if (!currentChapter || isAiRewriting || isBatchCompressing) return;
@@ -812,18 +899,24 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       return;
     }
 
+    // Cancel any in-flight background lookahead while foreground chapter summarizes
+    lookaheadAbortControllerRef.current?.abort();
+    setLookaheadChapterNum(null);
+
     setConfirmOverwriteChapterId(null);
     setIsAiRewriting(true);
     setAiErrorBanner(null);
     setAiStatusBanner(
-      `Summarizing Chapter ${currentChapter.number}: "${currentChapter.title}" (${activeAuthorDisplayName} · ${detailLevel})...`
+      `Summarizing Chapter ${currentChapter.number}: "${currentChapter.title}" (${activeAuthorDisplayName})...`
     );
 
     const ok = await compressSpecificChapter(currentChapter, forceRegenerate);
 
     if (ok) {
+      // Activate smart rolling 3-chapter lookahead in the background for this book
+      setSmartLookaheadBookId(book.id);
       setAiStatusBanner(
-        `Chapter ${currentChapter.number} summary ready in ${activeAuthorDisplayName}'s voice.`
+        `Chapter ${currentChapter.number} summary ready in ${activeAuthorDisplayName}'s voice. Smart Lookahead is pre-summarizing the next ${LOOKAHEAD_CHAPTER_COUNT} chapters in advance.`
       );
     } else {
       setAiStatusBanner(null);
@@ -833,18 +926,25 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
   async function handleCompressAllChaptersSequentially() {
     if (isBatchCompressing || isAiRewriting) return;
+    lookaheadAbortControllerRef.current?.abort();
+    setLookaheadChapterNum(null);
+    setSmartLookaheadBookId(null);
     setIsBatchCompressing(true);
     setAiErrorBanner(null);
 
-    const uncompressedList = book.chapters.filter(
-      (ch) => !isChapterCompressed(ch)
+    const missingCompressed = book.chapters.filter(
+      (ch) =>
+        !isChapterCompressed(ch) ||
+        !ch.personaCompactCache?.[personaCacheKey]?.length
     );
+    const uncompressedList =
+      missingCompressed.length > 0 ? missingCompressed : book.chapters;
     let succeededCount = 0;
 
     for (let i = 0; i < uncompressedList.length; i++) {
       const ch = uncompressedList[i];
       setAiStatusBanner(
-        `Summarizing Chapter ${ch.number} of ${book.chapters.length} ("${ch.title}")...`
+        `Summarizing Whole Book: Chapter ${ch.number} of ${book.chapters.length} ("${ch.title}")...`
       );
       const ok = await compressSpecificChapter(ch);
       if (!ok) {
@@ -857,7 +957,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
     if (succeededCount > 0) {
       setAiStatusBanner(
-        `Summarized ${succeededCount} chapter${
+        `Summarized all ${succeededCount} chapter${
           succeededCount === 1 ? '' : 's'
         } with verified AI output.`
       );
@@ -1344,6 +1444,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
               <button
                 key={t.id}
                 type="button"
+                data-testid={`theme-option-${t.id}`}
                 aria-pressed={activeTheme === t.id}
                 onClick={() => onUpdateSettings({ readingTheme: t.id })}
                 className={`px-2.5 py-1.5 font-mono-tech text-xs font-bold cursor-pointer ${
@@ -1611,30 +1712,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
 
             <div className="flex items-center gap-2 relative">
-              <div
-                className="flex items-center gap-1"
-                role="group"
-                aria-label="Reading theme"
-              >
-                {(['paper', 'sepia', 'evening'] as const).map((theme) => (
-                  <button
-                    key={theme}
-                    type="button"
-                    aria-pressed={activeTheme === theme}
-                    onClick={() => onUpdateSettings({ readingTheme: theme })}
-                    className={`px-2 py-1 font-mono-tech text-[11px] uppercase cursor-pointer ${
-                      activeTheme === theme
-                        ? 'reader-control-btn-active font-bold'
-                        : 'reader-control-btn'
-                    }`}
-                  >
-                    {theme}
-                  </button>
-                ))}
-              </div>
-
               <button
                 type="button"
+                data-testid="appearance-settings-button"
                 aria-label="Reading typography settings"
                 aria-expanded={isTypographyOpen}
                 onClick={() => setIsTypographyOpen((v) => !v)}
@@ -1645,7 +1725,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 }`}
               >
                 <Type className="w-3.5 h-3.5" />
-                <span>Aa</span>
+                <span>Appearance</span>
               </button>
 
               <button
@@ -1711,31 +1791,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 relative">
-              <div
-                className="flex items-center gap-1"
-                role="group"
-                aria-label="Reading theme"
-              >
-                {(['paper', 'sepia', 'evening'] as const).map((theme) => (
-                  <button
-                    key={theme}
-                    type="button"
-                    data-testid={`theme-option-${theme}`}
-                    aria-pressed={activeTheme === theme}
-                    onClick={() => onUpdateSettings({ readingTheme: theme })}
-                    className={`px-2 py-1 font-mono-tech text-[11px] uppercase cursor-pointer ${
-                      activeTheme === theme
-                        ? 'reader-control-btn-active font-bold'
-                        : 'reader-control-btn'
-                    }`}
-                  >
-                    {theme}
-                  </button>
-                ))}
-              </div>
-
               <button
                 type="button"
+                data-testid="appearance-settings-button"
                 aria-label="Reading typography settings"
                 aria-expanded={isTypographyOpen}
                 onClick={() => setIsTypographyOpen((v) => !v)}
@@ -1746,8 +1804,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 }`}
               >
                 <Type className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Appearance</span>
-                <span className="sm:hidden">Aa</span>
+                <span>Appearance</span>
               </button>
 
               <button
@@ -1855,108 +1912,6 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                 </button>
               );
             })}
-          </div>
-
-          {/* Generation Preferences Bar (Separated from Chapter Summarization Action!) */}
-          <div className="px-3 sm:px-5 py-2 reader-surface-muted border-b-2 reader-divider text-xs">
-            <div className="flex items-center justify-between gap-2 sm:hidden">
-              <div className="font-mono-tech text-[11px] font-bold reader-text-secondary truncate">
-                Voice: <span className="reader-text-primary">{activeAuthorDisplayName}</span> · Detail: <span className="uppercase reader-text-primary">{detailLevel}</span>
-              </div>
-              <button
-                type="button"
-                aria-expanded={isMobilePrefsOpen}
-                onClick={() => setIsMobilePrefsOpen((v) => !v)}
-                className="px-2.5 py-1 reader-control-btn font-mono-tech text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
-              >
-                <Sliders className="w-3 h-3" />
-                <span>Preferences</span>
-                {isMobilePrefsOpen ? (
-                  <ChevronUp className="w-3 h-3" />
-                ) : (
-                  <ChevronDown className="w-3 h-3" />
-                )}
-              </button>
-            </div>
-
-            <div
-              className={`${
-                isMobilePrefsOpen ? 'flex mt-2.5 pt-2.5 border-t reader-divider' : 'hidden sm:flex'
-              } flex-wrap items-center justify-between gap-2.5`}
-            >
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted mr-1">
-                  Adapter Voice:
-                </span>
-                {(
-                  [
-                    'homelander',
-                    'taylor_swift',
-                    'deadpool',
-                    'gandalf',
-                  ] as PresetPersonalityId[]
-                ).map((pid) => {
-                  const p = PERSONALITY_PROFILES[pid];
-                  const active =
-                    !settings.useCustomAuthor &&
-                    settings.authorPersonality === pid;
-                  return (
-                    <button
-                      key={pid}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() =>
-                        onUpdateSettings({
-                          authorPersonality: pid,
-                          useCustomAuthor: false,
-                        })
-                      }
-                      className={`px-2.5 py-1 text-xs font-bold cursor-pointer whitespace-nowrap ${
-                        active
-                          ? 'reader-control-btn-active'
-                          : 'reader-control-btn'
-                      }`}
-                    >
-                      {p.name}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted mr-1">
-                  Summary Detail:
-                </span>
-                {(['compact', 'detailed', 'bullet'] as SummaryDetailLevel[]).map(
-                  (lvl) => (
-                    <button
-                      key={lvl}
-                      type="button"
-                      aria-pressed={detailLevel === lvl}
-                      onClick={() =>
-                        onUpdateSettings({ summaryDetailLevel: lvl })
-                      }
-                      className={`px-2 py-1 font-mono-tech text-[11px] font-bold uppercase cursor-pointer ${
-                        detailLevel === lvl
-                          ? 'reader-control-btn-active'
-                          : 'reader-control-btn'
-                      }`}
-                    >
-                      {lvl}
-                    </button>
-                  )
-                )}
-
-                <button
-                  type="button"
-                  onClick={onOpenSettingsTab}
-                  className="px-2.5 py-1 reader-control-btn font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap ml-1"
-                >
-                  <Sliders className="w-3.5 h-3.5" />
-                  <span>Custom Voices</span>
-                </button>
-              </div>
-            </div>
           </div>
         </>
       )}
@@ -2446,14 +2401,25 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                               />
                             </div>
                             <div className="min-w-0">
-                              <div className="font-bold reader-text-primary truncate">
-                                Chapter {currentChapter.number} Adapter:{' '}
-                                {activeAuthorDisplayName} ({detailLevel})
+                              <div className="font-bold reader-text-primary truncate flex items-center gap-1.5">
+                                <span>
+                                  Chapter {currentChapter.number} Adapter:{' '}
+                                  {activeAuthorDisplayName}
+                                </span>
+                                {smartLookaheadBookId === book.id && (
+                                  <span className="px-1.5 py-0.5 text-[10px] font-mono-tech uppercase reader-control-btn-active">
+                                    {lookaheadChapterNum
+                                      ? `Prefetching Ch. ${lookaheadChapterNum}...`
+                                      : 'Smart 3-Ch Lookahead On'}
+                                  </span>
+                                )}
                               </div>
                               <div className="reader-text-muted text-[11px] truncate">
-                                {currentChapterIsCompressed
+                                {lookaheadChapterNum
+                                  ? `Auto-summarizing Ch. ${lookaheadChapterNum} in background (next 3 chapters rolling window)`
+                                  : currentChapterIsCompressed
                                   ? `Verified summary active for "${currentChapter.title}"`
-                                  : `Ready to summarize "${currentChapter.title}"`}
+                                  : `Summarize this chapter & auto-prefetch the next 3 chapters as you read`}
                               </div>
                             </div>
                           </div>
@@ -2513,7 +2479,27 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
                                     ? `Summarizing Ch. ${currentChapter.number}...`
                                     : currentChapterIsCompressed
                                     ? `Regenerate Ch. ${currentChapter.number} (${activeAuthorDisplayName})`
-                                    : `AI Summarize Ch. ${currentChapter.number} (${activeAuthorDisplayName})`}
+                                    : `Summarize Ch. ${currentChapter.number} + Next 3`}
+                                </span>
+                              </button>
+                            )}
+
+                            {book.chapters.length > 1 && (
+                              <button
+                                type="button"
+                                data-testid="summarize-whole-book-button"
+                                disabled={isBatchCompressing || isAiRewriting}
+                                onClick={() =>
+                                  void handleCompressAllChaptersSequentially()
+                                }
+                                className="px-2.5 py-1.5 reader-control-btn font-mono-tech text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                title="Summarize all chapters in this book sequentially"
+                              >
+                                <Zap className="w-3.5 h-3.5" />
+                                <span>
+                                  {isBatchCompressing
+                                    ? 'Summarizing Book...'
+                                    : 'Summarize Whole Book'}
                                 </span>
                               </button>
                             )}

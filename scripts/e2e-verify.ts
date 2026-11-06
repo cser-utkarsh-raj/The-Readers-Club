@@ -423,6 +423,12 @@ function main() {
       if (compactTabBtn) compactTabBtn.click();
       await wait(150);
 
+      const appearanceBtn = document.querySelector('[data-testid="appearance-settings-button"]');
+      if (appearanceBtn && !document.querySelector('[data-testid="theme-option-sepia"]')) {
+        appearanceBtn.click();
+        await wait(120);
+      }
+
       const sepiaBtn = document.querySelector('[data-testid="theme-option-sepia"]');
       if (sepiaBtn) sepiaBtn.click();
       await wait(150);
@@ -437,6 +443,11 @@ function main() {
       const proseEl = document.querySelector('[data-testid="reader-prose-content"]');
       const buttonUserSelect = eveningBtn ? window.getComputedStyle(eveningBtn).userSelect : '';
       const proseUserSelect = proseEl ? window.getComputedStyle(proseEl).userSelect : '';
+
+      if (appearanceBtn && document.querySelector('[data-testid="theme-option-evening"]')) {
+        appearanceBtn.click();
+        await wait(100);
+      }
 
       return { sepiaApplied, eveningApplied, buttonUserSelect, proseUserSelect };
     }`);
@@ -485,15 +496,20 @@ function main() {
       `[PASS] 14. Paper/Sepia/Evening themes, reload persistence, and user-select rules verified`
     );
 
-    // 15. Verify Contextual Chapter Summarization & Overwrite Confirmation
+    // 15. Verify Contextual Chapter Summarization, Whole-Book Button, Removed Adapter Voice/Summary Detail Bar & Overwrite Confirmation
     const overwriteConfirmCheck = evalJs<{
       hasContextualBar: boolean;
+      hasWholeBookButton: boolean;
+      noRedundantAdapterVoiceBar: boolean;
       confirmationAppeared: boolean;
       cancelledCleanly: boolean;
     }>(`async () => {
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       const bar = document.querySelector('[data-testid="contextual-chapter-action"]');
       const hasContextualBar = Boolean(bar);
+      const hasWholeBookButton = Boolean(document.querySelector('[data-testid="summarize-whole-book-button"]'));
+      const wsText = (document.querySelector('[data-testid="reader-workspace"]') || {}).textContent || '';
+      const noRedundantAdapterVoiceBar = !wsText.includes('Adapter Voice:') && !wsText.includes('Summary Detail:');
       const triggerBtn = document.querySelector('[data-testid="chapter-summarize-button"]');
       if (triggerBtn) triggerBtn.click();
       await wait(150);
@@ -505,9 +521,19 @@ function main() {
       await wait(150);
 
       const cancelledCleanly = !document.querySelector('[data-testid="overwrite-summary-confirmation"]');
-      return { hasContextualBar, confirmationAppeared, cancelledCleanly };
+      return { hasContextualBar, hasWholeBookButton, noRedundantAdapterVoiceBar, confirmationAppeared, cancelledCleanly };
     }`);
     assert.equal(overwriteConfirmCheck.hasContextualBar, true);
+    assert.equal(
+      overwriteConfirmCheck.hasWholeBookButton,
+      true,
+      'Reader contextual bar must expose a Summarize Whole Book button alongside smart 3-chapter lookahead'
+    );
+    assert.equal(
+      overwriteConfirmCheck.noRedundantAdapterVoiceBar,
+      true,
+      'Redundant Adapter Voice: and Summary Detail: bar must be removed from the Reader'
+    );
     assert.equal(
       overwriteConfirmCheck.confirmationAppeared,
       true,
@@ -515,7 +541,7 @@ function main() {
     );
     assert.equal(overwriteConfirmCheck.cancelledCleanly, true);
     console.log(
-      `[PASS] 15. Contextual chapter summarization and overwrite confirmation verified`
+      `[PASS] 15. Contextual chapter summarization, 3-chapter lookahead / whole-book controls, and overwrite confirmation verified`
     );
 
     // 16. Verify Focus Mode hides all non-reading UI and Escape exits while preserving chapter, mode, and scroll position
@@ -651,8 +677,15 @@ function main() {
     }
     // Reset to Paper theme and 1280x800
     evalJs(`() => {
+      const appearanceBtn = document.querySelector('[data-testid="appearance-settings-button"]');
+      if (appearanceBtn && !document.querySelector('[data-testid="theme-option-paper"]')) {
+        appearanceBtn.click();
+      }
       const paperBtn = document.querySelector('[data-testid="theme-option-paper"]');
       if (paperBtn) paperBtn.click();
+      if (appearanceBtn && document.querySelector('[data-testid="theme-option-paper"]')) {
+        appearanceBtn.click();
+      }
     }`);
     console.log(
       `[PASS] 17. Responsive reader layout verified across 320px, 375px, 390px, 430px, 768px, 1024px, and 1280px with zero horizontal overflow`
