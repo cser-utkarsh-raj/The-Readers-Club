@@ -33,6 +33,12 @@ export interface PersistedClubAppStateV2 {
 }
 
 export const DEFAULT_CLUB_SETTINGS: ClubSettings = {
+  readingTheme: 'paper',
+  readerFontSize: 'md',
+  readerLineHeight: 'relaxed',
+  readerParagraphSpacing: 'normal',
+  readerContentWidth: 'comfortable',
+  readerFontFamily: 'serif',
   authorPersonality: 'gandalf',
   narratorPersonality: 'gandalf',
   defaultSummaryMode: 'compact',
@@ -40,6 +46,8 @@ export const DEFAULT_CLUB_SETTINGS: ClubSettings = {
   targetCompressionRatio: 0.175,
   customAuthorTrait: '',
   customNarratorTrait: '',
+  useCustomAuthor: false,
+  useCustomNarrator: false,
 };
 
 export const DEFAULT_USER_TASTE_PROFILE: UserTasteProfile = {
@@ -92,6 +100,48 @@ export function migratePersistedState(raw: unknown): PersistedClubAppStateV2 {
       'gandalf',
     ];
     if (
+      typeof s.readingTheme === 'string' &&
+      ['paper', 'sepia', 'evening'].includes(s.readingTheme)
+    ) {
+      baseState.settings.readingTheme =
+        s.readingTheme as ClubSettings['readingTheme'];
+    }
+    if (
+      typeof s.readerFontSize === 'string' &&
+      ['sm', 'md', 'lg', 'xl'].includes(s.readerFontSize)
+    ) {
+      baseState.settings.readerFontSize =
+        s.readerFontSize as ClubSettings['readerFontSize'];
+    }
+    if (
+      typeof s.readerLineHeight === 'string' &&
+      ['snug', 'relaxed', 'loose'].includes(s.readerLineHeight)
+    ) {
+      baseState.settings.readerLineHeight =
+        s.readerLineHeight as ClubSettings['readerLineHeight'];
+    }
+    if (
+      typeof s.readerParagraphSpacing === 'string' &&
+      ['compact', 'normal', 'roomy'].includes(s.readerParagraphSpacing)
+    ) {
+      baseState.settings.readerParagraphSpacing =
+        s.readerParagraphSpacing as ClubSettings['readerParagraphSpacing'];
+    }
+    if (
+      typeof s.readerContentWidth === 'string' &&
+      ['narrow', 'comfortable', 'wide'].includes(s.readerContentWidth)
+    ) {
+      baseState.settings.readerContentWidth =
+        s.readerContentWidth as ClubSettings['readerContentWidth'];
+    }
+    if (
+      typeof s.readerFontFamily === 'string' &&
+      ['serif', 'sans'].includes(s.readerFontFamily)
+    ) {
+      baseState.settings.readerFontFamily =
+        s.readerFontFamily as ClubSettings['readerFontFamily'];
+    }
+    if (
       typeof s.authorPersonality === 'string' &&
       validPersonas.includes(s.authorPersonality as PresetPersonalityId)
     ) {
@@ -104,6 +154,15 @@ export function migratePersistedState(raw: unknown): PersistedClubAppStateV2 {
     ) {
       baseState.settings.narratorPersonality =
         s.narratorPersonality as PresetPersonalityId;
+    }
+    if (
+      typeof s.defaultSummaryMode === 'string' &&
+      ['original', 'compact', 'super_short', 'bullet', 'audiobook'].includes(
+        s.defaultSummaryMode
+      )
+    ) {
+      baseState.settings.defaultSummaryMode =
+        s.defaultSummaryMode as ClubSettings['defaultSummaryMode'];
     }
     if (
       typeof s.summaryDetailLevel === 'string' &&
@@ -125,6 +184,12 @@ export function migratePersistedState(raw: unknown): PersistedClubAppStateV2 {
     }
     if (typeof s.customNarratorTrait === 'string') {
       baseState.settings.customNarratorTrait = s.customNarratorTrait.slice(0, 120);
+    }
+    if (typeof s.useCustomAuthor === 'boolean') {
+      baseState.settings.useCustomAuthor = s.useCustomAuthor;
+    }
+    if (typeof s.useCustomNarrator === 'boolean') {
+      baseState.settings.useCustomNarrator = s.useCustomNarrator;
     }
   }
 
@@ -195,6 +260,11 @@ export function migratePersistedState(raw: unknown): PersistedClubAppStateV2 {
             typeof entry.lastSummaryMode === 'string'
               ? (entry.lastSummaryMode as BookReadingProgress['lastSummaryMode'])
               : 'compact',
+          scrollRatio:
+            typeof entry.scrollRatio === 'number' &&
+            Number.isFinite(entry.scrollRatio)
+              ? Math.max(0, Math.min(1, entry.scrollRatio))
+              : 0,
           audioChunkIndex:
             typeof entry.audioChunkIndex === 'number'
               ? Math.max(0, entry.audioChunkIndex)

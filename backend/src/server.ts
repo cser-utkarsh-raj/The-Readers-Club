@@ -46,6 +46,10 @@ export function getTtsModelName(): string {
   return (process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-lite-tts').trim();
 }
 
+export function getMascotModelName(): string {
+  return (process.env.GEMINI_MASCOT_MODEL || 'gemini-3.1-flash-lite').trim();
+}
+
 function getAiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || apiKey.trim().length < 8) {
@@ -381,12 +385,10 @@ export function validateSummarizeApiResponse(parsed: unknown): {
   return { valid: true, compactText, bulletPoints };
 }
 
-export type MascotTaskTier = 'complex' | 'general' | 'fast';
+export type MascotTaskTier = 'fast';
 
-export function resolveMascotModelTier(tier?: unknown): string {
-  if (tier === 'fast') return 'gemini-3.1-flash-lite';
-  if (tier === 'general') return 'gemini-3.8-flash';
-  return 'gemini-4-argon';
+export function resolveMascotModelTier(_tier?: unknown): string {
+  return getMascotModelName();
 }
 
 export function validateMascotChatRequest(body: unknown): {
@@ -422,21 +424,19 @@ export function validateMascotChatRequest(body: unknown): {
 
   const rawHistory = Array.isArray(obj.history) ? obj.history : [];
   const history: Array<{ role: 'user' | 'model'; text: string }> = [];
-  for (const item of rawHistory.slice(-24)) {
+  for (const item of rawHistory.slice(-16)) {
     if (item && typeof item === 'object') {
       const turn = item as Record<string, unknown>;
       const role = turn.role === 'model' ? 'model' : 'user';
-      const text = String(turn.text || '').trim().slice(0, 3000);
+      const text = String(turn.text || '').trim().slice(0, 2500);
       if (text) {
         history.push({ role, text });
       }
     }
   }
 
-  const taskTier: MascotTaskTier =
-    obj.taskTier === 'complex' || obj.taskTier === 'general'
-      ? obj.taskTier
-      : 'fast';
+  const taskTier: MascotTaskTier = 'fast';
+  const modelName = getMascotModelName();
 
   return {
     valid: true,
@@ -444,7 +444,7 @@ export function validateMascotChatRequest(body: unknown): {
       message,
       history,
       taskTier,
-      modelName: resolveMascotModelTier(taskTier),
+      modelName,
       personaName: String(obj.personaName || 'Gandalf').trim().slice(0, 80),
       personaStylePrompt: String(
         obj.personaStylePrompt ||
@@ -1337,78 +1337,54 @@ Rules:
         },
       ];
 
-      let usedModel = modelName;
-      let response;
-      try {
-        response = await runAiLimited(() =>
-          withRetryAndTimeout(
-            async () =>
-              ai.models.generateContent({
-                model: usedModel,
-                contents,
-                config: {
-                  systemInstruction,
-                },
-              }),
-            {
-              maxRetries: 2,
-              baseDelayMs: retryBaseDelayMs,
-              timeoutMs: retryTimeoutMs,
-            }
-          )
-        );
-      } catch (chatErr: unknown) {
-        const errStr = String(chatErr);
-        if (
-          usedModel !== 'gemini-3.1-flash-lite' &&
-          (errStr.includes('429') ||
-            errStr.includes('503') ||
-            errStr.includes('RESOURCE_EXHAUSTED') ||
-            errStr.includes('UNAVAILABLE'))
-        ) {
-          usedModel = 'gemini-3.1-flash-lite';
-          response = await runAiLimited(() =>
-            withRetryAndTimeout(
-              async () =>
-                ai.models.generateContent({
-                  model: usedModel,
-                  contents,
-                  config: {
-                    systemInstruction,
-                  },
-                }),
-              {
-                maxRetries: 1,
-                baseDelayMs: retryBaseDelayMs,
-                timeoutMs: retryTimeoutMs,
-              }
-            )
-          );
-        } else {
-          throw chatErr;
-        }
-      }
+      const response = await runAiLimited(() =>
+        withRetryAndTimeout(
+          async () =>
+            ai.models.generateContent({
+              model: modelName,
+              contents,
+              config: {
+                systemInstruction,
+              },
+            }),
+          {
+            maxRetries: 2,
+            baseDelayMs: retryBaseDelayMs,
+            timeoutMs: retryTimeoutMs,
+          }
+        )
+      );
 
       const replyText = (response.text ?? '').trim();
       if (!replyText) {
         return res.status(502).json({
           error: 'EMPTY_MASCOT_RESPONSE',
-          message: 'Mascot returned an empty response.',
+          message:
+            'Mascot is temporarily unavailable (empty response from literary assistant). Please try again in a moment.',
         });
       }
 
       return res.json({
         reply: replyText,
-        model: usedModel,
+        model: modelName,
         personaName,
         timestamp: new Date().toISOString(),
       });
     } catch (error: unknown) {
-      const msg =
+      const rawMsg =
         error instanceof Error ? error.message : 'Mascot chat request failed';
-      return res.status(502).json({
+      const isQuotaOrOverload =
+        rawMsg.includes('429') ||
+        rawMsg.includes('503') ||
+        rawMsg.includes('RESOURCE_EXHAUSTED') ||
+        rawMsg.includes('UNAVAILABLE') ||
+        rawMsg.includes('timed out');
+      const friendlyMessage = isQuotaOrOverload
+        ? 'Mascot is temporarily unavailable due to high service demand or rate limits. Please wait a moment and retry.'
+        : rawMsg;
+      return res.status(isQuotaOrOverload ? 503 : 502).json({
         error: 'MASCOT_CHAT_ERROR',
-        message: msg,
+        message: friendlyMessage,
       });
     }
   });

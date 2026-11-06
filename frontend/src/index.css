@@ -117,18 +117,217 @@
 }
 
 
-/* Reader themes: the preference is persisted with ClubSettings. */
-.reader-theme-paper { --reader-surface:#fbf8f1; --reader-ink:#24211d; }
-.reader-theme-sepia { --reader-surface:#efe2c7; --reader-ink:#493725; }
-.reader-theme-evening { --reader-surface:#24272b; --reader-ink:#e8e1d5; }
-.reader-workspace.reader-theme-paper,.reader-workspace.reader-theme-sepia,.reader-workspace.reader-theme-evening { background-color:var(--reader-surface); color:var(--reader-ink); }
-.reader-workspace.reader-theme-paper .bg-reader-paper,.reader-workspace.reader-theme-sepia .bg-reader-paper,.reader-workspace.reader-theme-evening .bg-reader-paper { background-color:var(--reader-surface) !important; color:var(--reader-ink); }
-.reader-workspace.reader-theme-evening .bg-white { background-color:#30343a !important; color:var(--reader-ink) !important; }
-.reader-workspace.reader-theme-evening [class*="text-[#111]"],.reader-workspace.reader-theme-evening [class*="text-[#222]"],.reader-workspace.reader-theme-evening [class*="text-[#444]"] { color:var(--reader-ink) !important; }
-.reader-workspace.reader-theme-sepia [class*="text-[#111]"],.reader-workspace.reader-theme-sepia [class*="text-[#222]"] { color:var(--reader-ink) !important; }
+/* ============================================================================
+   READER THEME TOKENS — PAPER, SEPIA, EVENING
+   ============================================================================ */
+.reader-theme-paper {
+  --reader-bg: #FBF8F1;
+  --reader-surface: #FFFFFF;
+  --reader-surface-muted: #F3EFE6;
+  --reader-surface-subtle: #EAE3D5;
+  --reader-ink: #24211D;
+  --reader-ink-secondary: #4A443C;
+  --reader-ink-muted: #6E665C;
+  --reader-border: #D6CEBE;
+  --reader-border-strong: #24211D;
+  --reader-accent: #8C3B2B;
+  --reader-accent-bg: #F5EAE6;
+  --reader-accent-ink: #5E2216;
+  --reader-control-active-bg: #24211D;
+  --reader-control-active-ink: #FBF8F1;
+  --reader-selection-bg: rgba(196, 148, 74, 0.28);
+  --reader-selection-ink: #181512;
+  --reader-progress-track: #E5DFD2;
+  --reader-progress-fill: #8C3B2B;
+  --reader-toolbar-bg: rgba(243, 239, 230, 0.96);
+  --reader-shadow-color: #24211D;
+}
 
-.reader-focus-mode { position:fixed; inset:0; z-index:100; width:100vw; height:100dvh; max-height:100dvh; overflow-y:auto; border:0 !important; border-radius:0 !important; box-shadow:none !important; padding-bottom:env(safe-area-inset-bottom); }
-.reader-focus-mode > :first-child { position:sticky; top:0; z-index:5; }
-@media (max-width:640px) { .reader-focus-mode { padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); } }
-body:has(.reader-focus-mode) .mascot-chat-widget { display: none !important; }
+.reader-theme-sepia {
+  --reader-bg: #F1E4C8;
+  --reader-surface: #F7EDD8;
+  --reader-surface-muted: #E5D4B3;
+  --reader-surface-subtle: #DAC6A0;
+  --reader-ink: #382616;
+  --reader-ink-secondary: #543B23;
+  --reader-ink-muted: #705235;
+  --reader-border: #C4AE88;
+  --reader-border-strong: #4A331D;
+  --reader-accent: #7C3F14;
+  --reader-accent-bg: #E4CFA8;
+  --reader-accent-ink: #421F06;
+  --reader-control-active-bg: #382616;
+  --reader-control-active-ink: #F7EDD8;
+  --reader-selection-bg: rgba(156, 98, 38, 0.28);
+  --reader-selection-ink: #24160B;
+  --reader-progress-track: #DECAA4;
+  --reader-progress-fill: #7C3F14;
+  --reader-toolbar-bg: rgba(229, 212, 179, 0.96);
+  --reader-shadow-color: #4A331D;
+}
+
+.reader-theme-evening {
+  --reader-bg: #1B1E23;
+  --reader-surface: #23272E;
+  --reader-surface-muted: #15181C;
+  --reader-surface-subtle: #2C313A;
+  --reader-ink: #E6DFD3;
+  --reader-ink-secondary: #C4BDB0;
+  --reader-ink-muted: #989286;
+  --reader-border: #323741;
+  --reader-border-strong: #49505E;
+  --reader-accent: #D99B43;
+  --reader-accent-bg: rgba(217, 155, 67, 0.16);
+  --reader-accent-ink: #F2C472;
+  --reader-control-active-bg: #D99B43;
+  --reader-control-active-ink: #15181C;
+  --reader-selection-bg: rgba(217, 155, 67, 0.34);
+  --reader-selection-ink: #FFFDF9;
+  --reader-progress-track: #2A2F37;
+  --reader-progress-fill: #D99B43;
+  --reader-toolbar-bg: rgba(21, 24, 28, 0.96);
+  --reader-shadow-color: #0B0D10;
+}
+
+.reader-workspace {
+  background-color: var(--reader-bg);
+  color: var(--reader-ink);
+  border-color: var(--reader-border-strong);
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.reader-surface {
+  background-color: var(--reader-surface);
+  color: var(--reader-ink);
+  border-color: var(--reader-border);
+}
+
+.reader-surface-muted {
+  background-color: var(--reader-surface-muted);
+  color: var(--reader-ink);
+  border-color: var(--reader-border);
+}
+
+.reader-text-primary {
+  color: var(--reader-ink);
+}
+
+.reader-text-secondary {
+  color: var(--reader-ink-secondary);
+}
+
+.reader-text-muted {
+  color: var(--reader-ink-muted);
+}
+
+.reader-accent-text {
+  color: var(--reader-accent);
+}
+
+.reader-divider {
+  border-color: var(--reader-border);
+}
+
+.reader-control-btn {
+  background-color: var(--reader-surface);
+  color: var(--reader-ink);
+  border: 1.5px solid var(--reader-border);
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.reader-control-btn:hover:not(:disabled) {
+  background-color: var(--reader-surface-subtle);
+  border-color: var(--reader-border-strong);
+}
+
+.reader-control-btn-active {
+  background-color: var(--reader-control-active-bg);
+  color: var(--reader-control-active-ink);
+  border: 1.5px solid var(--reader-control-active-bg);
+}
+
+.reader-accent-btn {
+  background-color: var(--reader-accent);
+  color: #FFFDF9;
+  border: 1.5px solid var(--reader-border-strong);
+}
+
+.reader-theme-evening .reader-accent-btn {
+  color: #15181C;
+  border-color: var(--reader-accent);
+}
+
+/* ============================================================================
+   TEXT SELECTION & BLUE HIGHLIGHTING DISCIPLINE
+   ============================================================================ */
+/* Prevent accidental browser selection on UI controls, buttons, tabs, and chrome */
+.reader-workspace button,
+.reader-workspace [role="tab"],
+.reader-workspace [role="tablist"],
+.reader-workspace [role="toolbar"],
+.reader-workspace [role="group"],
+.reader-workspace aside,
+.reader-workspace .reader-ui-chrome,
+.reader-ui-control {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Keep actual book manuscript, summaries, and highlights fully selectable and copyable */
+.reader-workspace .reader-prose,
+.reader-workspace .reader-prose p,
+.reader-workspace .reader-prose li,
+.reader-workspace .reader-prose h1,
+.reader-workspace .reader-prose h2,
+.reader-workspace .reader-prose h3,
+.reader-workspace .reader-prose h4,
+.reader-workspace .reader-prose blockquote,
+.reader-workspace .reader-selectable {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
+}
+
+/* Subtle theme-aware ::selection highlight on manuscript content */
+.reader-workspace .reader-prose::selection,
+.reader-workspace .reader-prose *::selection,
+.reader-workspace .reader-selectable::selection,
+.reader-workspace .reader-selectable *::selection {
+  background-color: var(--reader-selection-bg);
+  color: var(--reader-selection-ink);
+}
+
+/* ============================================================================
+   DISTRACTION-FREE FOCUS MODE LAYOUT
+   ============================================================================ */
+.reader-focus-mode {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background-color: var(--reader-bg);
+  color: var(--reader-ink);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+body:has(.reader-focus-mode) {
+  overflow: hidden;
+}
+
+body:has(.reader-focus-mode) .mascot-chat-widget,
+body:has(.reader-focus-mode) .app-shell-header,
+body:has(.reader-focus-mode) .app-shell-footer {
+  display: none !important;
+}
+
 

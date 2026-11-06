@@ -227,8 +227,13 @@ export default function App() {
     navigateToPage('home');
   }
 
+  const [isReaderFocusMode, setIsReaderFocusMode] = useState(false);
+
   function navigateToPage(page: AppPageRoute) {
     setActivePage(page);
+    if (page !== 'reader') {
+      setIsReaderFocusMode(false);
+    }
     if (typeof window !== 'undefined') {
       const targetPath = page === 'home' ? '/' : `/${page}`;
       if (window.location.pathname !== targetPath) {
@@ -240,7 +245,11 @@ export default function App() {
 
   useEffect(() => {
     const onPopState = () => {
-      setActivePage(getInitialRouteFromPath());
+      const nextRoute = getInitialRouteFromPath();
+      setActivePage(nextRoute);
+      if (nextRoute !== 'reader') {
+        setIsReaderFocusMode(false);
+      }
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -254,6 +263,14 @@ export default function App() {
   }, [settings.authorPersonality]);
 
   const activeBook = books.find((b) => b.id === selectedBookId) || books[0];
+  const activeBookProgress = readingProgressByBookId[activeBook.id];
+  const activeReaderChapter =
+    activeBook.chapters[
+      Math.min(
+        Math.max(0, activeBookProgress?.lastChapterIndex ?? 0),
+        Math.max(0, activeBook.chapters.length - 1)
+      )
+    ] || activeBook.chapters[0];
 
   const activeAuthorProfile = PERSONALITY_PROFILES[settings.authorPersonality];
   const activeNarratorProfile =
@@ -784,59 +801,66 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
     [tasteProfile.dislikedBookIds]
   );
 
+  const isFocusActive = activePage === 'reader' && isReaderFocusMode;
+
   return (
-    <div className="min-h-screen bg-jacket-orange text-[#111] flex flex-col">
+    <div className="min-h-screen bg-jacket-orange text-[#111] flex flex-col overflow-x-hidden">
       {/* CLEAN, USER-FRIENDLY HEADER WITH CUSTOM POP-ART LOGO */}
-      <header className="flex items-center justify-between gap-4 px-4 sm:px-6 py-3 bg-[#111] text-white border-b-[3px] border-[#111] sticky top-0 z-40">
-        {/* Zone 1: Pop-Art Logo + Brand Name */}
-        <button
-          type="button"
-          onClick={() => navigateToPage('home')}
-          className="flex items-center gap-2.5 cursor-pointer shrink-0 group"
+      {!isFocusActive && (
+        <header
+          data-testid="app-main-header"
+          className="app-shell-header flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 sm:gap-4 px-3 sm:px-6 py-2.5 sm:py-3 bg-[#111] text-white border-b-[3px] border-[#111] sticky top-0 z-40 select-none"
         >
-          <ReadersClubLogo className="w-9 h-9 group-hover:scale-105 transition-transform" />
-          <span className="font-display-brutal text-lg tracking-tight text-[#F6C90E] whitespace-nowrap">
-            THE READERS CLUB
-          </span>
-        </button>
-
-        {/* Zone 2: Simple 5-Page Navigation */}
-        <nav
-          aria-label="Main Navigation"
-          className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto py-1"
-        >
-          {navItems.map((item) => {
-            const isActive = activePage === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => navigateToPage(item.id)}
-                className={`px-3.5 py-1.5 text-xs sm:text-sm font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer border-2 ${
-                  isActive
-                    ? 'bg-[#F6C90E] text-[#111] border-white font-display-brutal uppercase'
-                    : 'bg-transparent text-neutral-200 border-transparent hover:text-[#F6C90E] hover:border-neutral-700'
-                }`}
-              >
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Zone 3: Continue Reading + PWA Install */}
-        <div className="hidden lg:flex items-center gap-2.5 shrink-0">
-          <PWAInstallButton />
+          {/* Zone 1: Pop-Art Logo + Brand Name */}
           <button
             type="button"
-            onClick={() => navigateToPage('reader')}
-            className="px-3.5 py-1.5 text-xs font-display-brutal uppercase bg-[#E50914] text-white border-2 border-white hover:bg-[#B8000A] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
+            onClick={() => navigateToPage('home')}
+            className="flex items-center gap-2 cursor-pointer shrink-0 group select-none"
           >
-            <BookOpen className="w-3.5 h-3.5" />
-            <span>Continue Reading</span>
+            <ReadersClubLogo className="w-8 h-8 sm:w-9 sm:h-9 group-hover:scale-105 transition-transform" />
+            <span className="font-display-brutal text-sm sm:text-lg tracking-tight text-[#F6C90E] whitespace-nowrap">
+              THE READERS CLUB
+            </span>
           </button>
-        </div>
-      </header>
+
+          {/* Zone 2: Simple 5-Page Navigation */}
+          <nav
+            aria-label="Main Navigation"
+            className="flex items-center gap-1 sm:gap-2 overflow-x-auto max-w-full py-1 select-none"
+          >
+            {navItems.map((item) => {
+              const isActive = activePage === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => navigateToPage(item.id)}
+                  className={`px-2.5 sm:px-3.5 py-1.5 text-[11px] sm:text-sm font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer border-2 select-none ${
+                    isActive
+                      ? 'bg-[#F6C90E] text-[#111] border-white font-display-brutal uppercase'
+                      : 'bg-transparent text-neutral-200 border-transparent hover:text-[#F6C90E] hover:border-neutral-700'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Zone 3: Continue Reading + PWA Install */}
+          <div className="hidden lg:flex items-center gap-2.5 shrink-0 select-none">
+            <PWAInstallButton />
+            <button
+              type="button"
+              onClick={() => navigateToPage('reader')}
+              className="px-3.5 py-1.5 text-xs font-display-brutal uppercase bg-[#E50914] text-white border-2 border-white hover:bg-[#B8000A] transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 select-none"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Continue Reading</span>
+            </button>
+          </div>
+        </header>
+      )}
 
       {/* =====================================================================
           PAGE 1: HOME (`/`)
@@ -1803,7 +1827,13 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
           PAGE 3: READER (`/reader`)
          ===================================================================== */}
       {activePage === 'reader' && (
-        <main className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex-1">
+        <main
+          className={
+            isFocusActive
+              ? 'w-full flex-1'
+              : 'max-w-[1440px] w-full mx-auto px-2.5 sm:px-6 py-4 sm:py-6 flex-1'
+          }
+        >
           <ReaderWorkspace
             book={activeBook}
             activeMode={activeMode}
@@ -1824,6 +1854,8 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
               !OPEN_SOURCE_BOOKS.some((b) => b.id === activeBook.id)
             }
             onRemoveBookFromLibrary={handleRemoveBookFromLibrary}
+            focusMode={isReaderFocusMode}
+            onToggleFocusMode={setIsReaderFocusMode}
           />
         </main>
       )}
@@ -2148,13 +2180,20 @@ Across the terraced gardens of the Eloi and the subterranean shafts of the Morlo
         </main>
       )}
 
-      <MascotChatWidget activeBook={activeBook} settings={settings} />
-
-      <DotFooter
-        appName="The Readers Club"
-        navItems={navItems}
-        onNavigate={navigateToPage}
+      <MascotChatWidget
+        activeBook={activeBook}
+        currentChapter={activeReaderChapter}
+        settings={settings}
+        hidden={isFocusActive}
       />
+
+      {!isFocusActive && (
+        <DotFooter
+          appName="The Readers Club"
+          navItems={navItems}
+          onNavigate={navigateToPage}
+        />
+      )}
 
       <OfflineIndicator />
     </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import {
   AudioEngineStatus,
   BookChapter,
@@ -8,6 +8,12 @@ import {
   ChapterSummaryMetadata,
   ClubSettings,
   PresetPersonalityId,
+  ReaderContentWidth,
+  ReaderFontFamily,
+  ReaderFontSize,
+  ReaderLineHeight,
+  ReaderParagraphSpacing,
+  ReadingTheme,
   SummaryDetailLevel,
   SummaryMode,
   TtsAudioChunk,
@@ -42,6 +48,8 @@ import {
   SkipForward,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Sliders,
   ArrowLeft,
   CheckCircle2,
@@ -51,6 +59,12 @@ import {
   ShieldCheck,
   Database,
   FileWarning,
+  Maximize2,
+  Minimize2,
+  Type,
+  PanelLeftClose,
+  PanelLeftOpen,
+  X,
 } from 'lucide-react';
 
 interface ReaderWorkspaceProps {
@@ -91,7 +105,34 @@ interface ReaderWorkspaceProps {
   onBackToCatalog?: () => void;
   canRemoveFromLibrary?: boolean;
   onRemoveBookFromLibrary?: (bookId: string) => void;
+  focusMode?: boolean;
+  onToggleFocusMode?: (nextFocus: boolean) => void;
 }
+
+const FONT_SIZE_MAP: Record<ReaderFontSize, string> = {
+  sm: '0.95rem',
+  md: '1.08rem',
+  lg: '1.22rem',
+  xl: '1.38rem',
+};
+
+const LINE_HEIGHT_MAP: Record<ReaderLineHeight, number> = {
+  snug: 1.6,
+  relaxed: 1.82,
+  loose: 2.05,
+};
+
+const PARAGRAPH_SPACING_MAP: Record<ReaderParagraphSpacing, string> = {
+  compact: '0.85em',
+  normal: '1.3em',
+  roomy: '1.8em',
+};
+
+const CONTENT_WIDTH_MAP: Record<ReaderContentWidth, string> = {
+  narrow: '54ch',
+  comfortable: '66ch',
+  wide: '78ch',
+};
 
 export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   book,
@@ -111,6 +152,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   onBackToCatalog,
   canRemoveFromLibrary = false,
   onRemoveBookFromLibrary,
+  focusMode: controlledFocusMode,
+  onToggleFocusMode,
 }) => {
   const initialChapterIdx =
     readingProgress &&
@@ -122,14 +165,39 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const [selectedChapterIdx, setSelectedChapterIdx] =
     useState<number>(initialChapterIdx);
   const [bulletScope, setBulletScope] = useState<BulletScope>('chapter');
-  const [focusMode, setFocusMode] = useState(false);
+  const [internalFocusMode, setInternalFocusMode] = useState(false);
 
-  useEffect(() => {
-    if (!focusMode) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setFocusMode(false); };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [focusMode]);
+  const focusMode =
+    controlledFocusMode !== undefined ? controlledFocusMode : internalFocusMode;
+
+  const [isTypographyOpen, setIsTypographyOpen] = useState(false);
+  const [isMobileChaptersOpen, setIsMobileChaptersOpen] = useState(false);
+  const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
+  const [isMobilePrefsOpen, setIsMobilePrefsOpen] = useState(false);
+  const [confirmOverwriteChapterId, setConfirmOverwriteChapterId] = useState<
+    string | null
+  >(null);
+
+  // Focus mode toolbar auto-hide on reading inactivity
+  const [isFocusToolbarVisible, setIsFocusToolbarVisible] = useState(true);
+  const focusToolbarTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+
+  // Scroll & reading progress preservation across normal <-> focus transitions
+  const readerSectionRef = useRef<HTMLElement | null>(null);
+  const readingProseRef = useRef<HTMLDivElement | null>(null);
+  const savedScrollStateRef = useRef<{
+    anchorIndex: number;
+    anchorOffsetRatio: number;
+    scrollRatio: number;
+  }>({
+    anchorIndex: 0,
+    anchorOffsetRatio: 0,
+    scrollRatio: readingProgress?.scrollRatio || 0,
+  });
+  const [chapterScrollPercent, setChapterScrollPercent] = useState<number>(0);
+
   const [isAiRewriting, setIsAiRewriting] = useState(false);
   const [isBatchCompressing, setIsBatchCompressing] = useState(false);
   const [aiStatusBanner, setAiStatusBanner] = useState<string | null>(null);
@@ -161,8 +229,259 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   const summaryAbortControllerRef = useRef<AbortController | null>(null);
   ttsChunksRef.current = ttsChunks;
 
+  const activeTheme: ReadingTheme = settings.readingTheme || 'paper';
+  const fontSize: ReaderFontSize = settings.readerFontSize || 'md';
+  const lineHeight: ReaderLineHeight = settings.readerLineHeight || 'relaxed';
+  const paragraphSpacing: ReaderParagraphSpacing =
+    settings.readerParagraphSpacing || 'normal';
+  const contentWidth: ReaderContentWidth =
+    settings.readerContentWidth || 'comfortable';
+  const fontFamily: ReaderFontFamily = settings.readerFontFamily || 'serif';
   const detailLevel: SummaryDetailLevel =
     settings.summaryDetailLevel || 'compact';
+
+  // Capture current reading scroll position before toggling focus mode
+  function captureCurrentReadingPosition() {
+    if (typeof window === 'undefined') return;
+    const proseEl = readingProseRef.current;
+    const sectionEl = readerSectionRef.current;
+
+    let scrollRatio = savedScrollStateRef.current.scrollRatio;
+    if (focusMode && sectionEl) {
+      const maxScroll = Math.max(
+        1,
+        sectionEl.scrollHeight - sectionEl.clientHeight
+      );
+      if (sectionEl.scrollTop > 0) {
+        scrollRatio = Math.max(0, Math.min(1, sectionEl.scrollTop / maxScroll));
+      }
+    } else {
+      const docMax = Math.max(
+        1,
+        document.documentElement.scrollHeight - window.innerHeight
+      );
+      if (window.scrollY > 0) {
+        scrollRatio = Math.max(0, Math.min(1, window.scrollY / docMax));
+      }
+    }
+
+    let anchorIndex = 0;
+    let anchorOffsetRatio = 0;
+    if (proseEl) {
+      const blocks = Array.from(proseEl.children) as HTMLElement[];
+      const referenceTop = 72;
+      for (let i = 0; i < blocks.length; i++) {
+        const rect = blocks[i].getBoundingClientRect();
+        if (rect.bottom > referenceTop) {
+          anchorIndex = i;
+          anchorOffsetRatio =
+            rect.height > 0
+              ? Math.max(
+                  0,
+                  Math.min(1, (referenceTop - rect.top) / rect.height)
+                )
+              : 0;
+          break;
+        }
+      }
+    }
+
+    savedScrollStateRef.current = {
+      anchorIndex,
+      anchorOffsetRatio,
+      scrollRatio,
+    };
+  }
+
+  function handleSetFocusMode(nextFocus: boolean) {
+    captureCurrentReadingPosition();
+    setIsTypographyOpen(false);
+    setIsFocusToolbarVisible(true);
+    if (onToggleFocusMode) {
+      onToggleFocusMode(nextFocus);
+    } else {
+      setInternalFocusMode(nextFocus);
+    }
+  }
+
+  // Restore scroll position seamlessly when entering or leaving focus mode
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return;
+    const { anchorIndex, anchorOffsetRatio, scrollRatio } =
+      savedScrollStateRef.current;
+    const proseEl = readingProseRef.current;
+    const sectionEl = readerSectionRef.current;
+
+    if (focusMode && sectionEl) {
+      if (proseEl && proseEl.children[anchorIndex] && anchorIndex > 0) {
+        const targetBlock = proseEl.children[anchorIndex] as HTMLElement;
+        const targetTop =
+          targetBlock.offsetTop +
+          targetBlock.offsetHeight * anchorOffsetRatio -
+          68;
+        sectionEl.scrollTop = Math.max(0, targetTop);
+      } else if (scrollRatio > 0) {
+        const maxScroll = Math.max(
+          0,
+          sectionEl.scrollHeight - sectionEl.clientHeight
+        );
+        sectionEl.scrollTop = Math.round(scrollRatio * maxScroll);
+      }
+    } else if (!focusMode) {
+      if (proseEl && proseEl.children[anchorIndex] && anchorIndex > 0) {
+        const targetBlock = proseEl.children[anchorIndex] as HTMLElement;
+        const rect = targetBlock.getBoundingClientRect();
+        const absoluteTop =
+          window.scrollY +
+          rect.top +
+          rect.height * anchorOffsetRatio -
+          84;
+        window.scrollTo({ top: Math.max(0, absoluteTop), behavior: 'instant' as ScrollBehavior });
+      } else if (scrollRatio > 0) {
+        const docMax = Math.max(
+          0,
+          document.documentElement.scrollHeight - window.innerHeight
+        );
+        window.scrollTo({
+          top: Math.round(scrollRatio * docMax),
+          behavior: 'instant' as ScrollBehavior,
+        });
+      }
+    }
+  }, [focusMode]);
+
+  // Escape key exits focus mode (or closes open popover first if desired, then exits focus mode)
+  useEffect(() => {
+    if (!focusMode) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsTypographyOpen(false);
+        captureCurrentReadingPosition();
+        if (onToggleFocusMode) {
+          onToggleFocusMode(false);
+        } else {
+          setInternalFocusMode(false);
+        }
+      } else {
+        setIsFocusToolbarVisible(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [focusMode, onToggleFocusMode]);
+
+  // Auto-hide focus mode toolbar after 3.5s of reading inactivity; show on mouse/touch/keyboard activity
+  useEffect(() => {
+    if (!focusMode) {
+      setIsFocusToolbarVisible(true);
+      if (focusToolbarTimerRef.current) {
+        clearTimeout(focusToolbarTimerRef.current);
+      }
+      return;
+    }
+
+    const scheduleHide = () => {
+      if (focusToolbarTimerRef.current) {
+        clearTimeout(focusToolbarTimerRef.current);
+      }
+      if (isTypographyOpen) {
+        setIsFocusToolbarVisible(true);
+        return;
+      }
+      focusToolbarTimerRef.current = setTimeout(() => {
+        setIsFocusToolbarVisible(false);
+      }, 3500);
+    };
+
+    const handleUserActivity = () => {
+      setIsFocusToolbarVisible(true);
+      scheduleHide();
+    };
+
+    scheduleHide();
+    window.addEventListener('mousemove', handleUserActivity, { passive: true });
+    window.addEventListener('touchstart', handleUserActivity, { passive: true });
+    window.addEventListener('keydown', handleUserActivity);
+
+    return () => {
+      if (focusToolbarTimerRef.current) {
+        clearTimeout(focusToolbarTimerRef.current);
+      }
+      window.removeEventListener('mousemove', handleUserActivity);
+      window.removeEventListener('touchstart', handleUserActivity);
+      window.removeEventListener('keydown', handleUserActivity);
+    };
+  }, [focusMode, isTypographyOpen]);
+
+  // Track scroll depth inside focus mode or window
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const updateScrollMetrics = () => {
+      const sectionEl = readerSectionRef.current;
+      const proseEl = readingProseRef.current;
+
+      if (focusMode && sectionEl) {
+        const maxScroll = Math.max(
+          1,
+          sectionEl.scrollHeight - sectionEl.clientHeight
+        );
+        const ratio = Math.max(
+          0,
+          Math.min(1, sectionEl.scrollTop / maxScroll)
+        );
+        setChapterScrollPercent(Math.round(ratio * 100));
+        savedScrollStateRef.current.scrollRatio = ratio;
+      } else if (proseEl) {
+        const rect = proseEl.getBoundingClientRect();
+        const viewHeight = window.innerHeight;
+        if (rect.height <= viewHeight) {
+          setChapterScrollPercent(100);
+        } else {
+          const scrolled = Math.max(0, viewHeight * 0.65 - rect.top);
+          const pct = Math.max(
+            0,
+            Math.min(100, Math.round((scrolled / rect.height) * 100))
+          );
+          setChapterScrollPercent(pct);
+        }
+        const docMax = Math.max(
+          1,
+          document.documentElement.scrollHeight - window.innerHeight
+        );
+        savedScrollStateRef.current.scrollRatio = Math.max(
+          0,
+          Math.min(1, window.scrollY / docMax)
+        );
+      }
+
+      if (proseEl) {
+        const blocks = Array.from(proseEl.children) as HTMLElement[];
+        for (let i = 0; i < blocks.length; i++) {
+          const r = blocks[i].getBoundingClientRect();
+          if (r.bottom > 72) {
+            savedScrollStateRef.current.anchorIndex = i;
+            savedScrollStateRef.current.anchorOffsetRatio =
+              r.height > 0
+                ? Math.max(0, Math.min(1, (72 - r.top) / r.height))
+                : 0;
+            break;
+          }
+        }
+      }
+    };
+
+    const sectionEl = readerSectionRef.current;
+    updateScrollMetrics();
+    window.addEventListener('scroll', updateScrollMetrics, { passive: true });
+    sectionEl?.addEventListener('scroll', updateScrollMetrics, {
+      passive: true,
+    });
+    return () => {
+      window.removeEventListener('scroll', updateScrollMetrics);
+      sectionEl?.removeEventListener('scroll', updateScrollMetrics);
+    };
+  }, [focusMode, selectedChapterIdx, activeMode]);
 
   // Fetch authentic Project Gutenberg chapters when opening a Gutendex book
   const fetchGutenbergManuscript = async () => {
@@ -208,6 +527,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     setAiErrorBanner(null);
     setAiStatusBanner(null);
     setGutenbergFetchError(null);
+    setConfirmOverwriteChapterId(null);
     summaryAbortControllerRef.current?.abort();
     summaryAbortControllerRef.current = null;
     stopAndCleanupAudio(true);
@@ -235,6 +555,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   // Persist chapter selection & mode changes
   useEffect(() => {
     if (!currentChapter) return;
+    setConfirmOverwriteChapterId(null);
     onUpdateReadingProgress?.(book.id, {
       lastChapterIndex: selectedChapterIdx,
       lastSummaryMode: activeMode,
@@ -275,7 +596,9 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     if (book.isPreCompressed !== false) return true;
     if (ch.personaCompactCache?.[personaCacheKey]?.length) return true;
     if (ch.personaCompactCache?.[settings.authorPersonality]?.length) return true;
-    return Boolean(ch.isCompressed && ch.compactText && ch.compactText.length > 0);
+    return Boolean(
+      ch.isCompressed && ch.compactText && ch.compactText.length > 0
+    );
   }
 
   const currentChapterIsCompressed = isChapterCompressed(currentChapter);
@@ -342,7 +665,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   }
 
   async function compressSpecificChapter(
-    targetChapter: BookChapter
+    targetChapter: BookChapter,
+    bypassClientCache = false
   ): Promise<boolean> {
     const stylePrompt =
       settings.useCustomAuthor && settings.customAuthorTrait.trim()
@@ -364,8 +688,8 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         : undefined,
     });
 
-    // 1. Check persisted client-side summary cache first
-    const cachedEntry = summaryCache[localCacheKey];
+    // 1. Check persisted client-side summary cache first (unless explicitly regenerating)
+    const cachedEntry = !bypassClientCache ? summaryCache[localCacheKey] : null;
     if (
       cachedEntry &&
       Array.isArray(cachedEntry.compactText) &&
@@ -444,7 +768,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         return true;
       }
 
-      // Honest failure handling: NEVER mark chapter as compressed or substitute fake AI text!
+      // Honest failure handling: NEVER mark chapter as compressed or substitute fake AI text
       const errorMsg =
         data?.message ||
         data?.error ||
@@ -469,19 +793,37 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     }
   }
 
-  async function handleCompressCurrentChapter() {
-    if (!currentChapter || isAiRewriting) return;
+  async function handleCompressCurrentChapter(forceRegenerate = false) {
+    if (!currentChapter || isAiRewriting || isBatchCompressing) return;
+
+    // Never silently overwrite an existing AI or curated summary without explicit confirmation
+    const hasExistingPersonaSummary = Boolean(
+      currentChapterIsCompressed ||
+        currentChapter.personaCompactCache?.[personaCacheKey]?.length ||
+        currentChapter.summaryStatus === 'ai_generated' ||
+        currentChapter.summaryStatus === 'cached'
+    );
+    if (
+      hasExistingPersonaSummary &&
+      !forceRegenerate &&
+      confirmOverwriteChapterId !== currentChapter.id
+    ) {
+      setConfirmOverwriteChapterId(currentChapter.id);
+      return;
+    }
+
+    setConfirmOverwriteChapterId(null);
     setIsAiRewriting(true);
     setAiErrorBanner(null);
     setAiStatusBanner(
-      `Generating ${activeAuthorDisplayName}'s ${detailLevel} AI summary for Chapter ${currentChapter.number}...`
+      `Summarizing Chapter ${currentChapter.number}: "${currentChapter.title}" (${activeAuthorDisplayName} · ${detailLevel})...`
     );
 
-    const ok = await compressSpecificChapter(currentChapter);
+    const ok = await compressSpecificChapter(currentChapter, forceRegenerate);
 
     if (ok) {
       setAiStatusBanner(
-        `Chapter ${currentChapter.number} AI summary ready in ${activeAuthorDisplayName}'s voice.`
+        `Chapter ${currentChapter.number} summary ready in ${activeAuthorDisplayName}'s voice.`
       );
     } else {
       setAiStatusBanner(null);
@@ -490,7 +832,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
   }
 
   async function handleCompressAllChaptersSequentially() {
-    if (isBatchCompressing) return;
+    if (isBatchCompressing || isAiRewriting) return;
     setIsBatchCompressing(true);
     setAiErrorBanner(null);
 
@@ -502,7 +844,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     for (let i = 0; i < uncompressedList.length; i++) {
       const ch = uncompressedList[i];
       setAiStatusBanner(
-        `Summarizing Chapter ${ch.number} of ${book.chapters.length} via AI...`
+        `Summarizing Chapter ${ch.number} of ${book.chapters.length} ("${ch.title}")...`
       );
       const ok = await compressSpecificChapter(ch);
       if (!ok) {
@@ -515,13 +857,14 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
 
     if (succeededCount > 0) {
       setAiStatusBanner(
-        `Summarized ${succeededCount} chapter${succeededCount === 1 ? '' : 's'} with verified AI output.`
+        `Summarized ${succeededCount} chapter${
+          succeededCount === 1 ? '' : 's'
+        } with verified AI output.`
       );
     }
     setIsBatchCompressing(false);
   }
 
-  // Build source text for TTS (uses verified compact paragraphs if compressed, otherwise original chapter paragraphs)
   function getAudioSourceParagraphs(): string[] {
     if (!currentChapter) return [];
     if (displayedCompactParagraphs.length > 0) {
@@ -537,7 +880,6 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     const sourceParagraphs = getAudioSourceParagraphs();
     if (sourceParagraphs.length === 0) return;
 
-    // Cancel any previous in-flight TTS generation session before starting a new one
     ttsAbortControllerRef.current?.abort();
     const controller = new AbortController();
     ttsAbortControllerRef.current = controller;
@@ -554,7 +896,6 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         ? settings.customNarratorTrait.trim()
         : narratorProfile.narratorStylePrompt;
 
-    // Generate all pending chunks sequentially so audiobook only transitions to READY once all chunks succeed
     for (let i = 0; i < workingChunks.length; i++) {
       if (ttsSessionIdRef.current !== sessionId || controller.signal.aborted) {
         return;
@@ -587,7 +928,6 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       );
       setTtsChunks([...workingChunks]);
 
-      // Stop sequential generation if a chunk fails—allow per-chunk retry without losing previous chunks
       if (generated.status === 'failed') {
         setIsPlayingAudio(false);
         return;
@@ -645,7 +985,6 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
     );
     setTtsChunks(updated);
 
-    // If this retry succeeded, continue generating any remaining pending chunks
     if (retried.status === 'ready') {
       const hasRemaining = updated.some(
         (c) => c.status === 'pending' || c.status === 'failed'
@@ -869,7 +1208,7 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       id: 'original',
       numberLabel: 'ORIGINAL',
       shortTitle: 'Full Text',
-      icon: <BookOpen className="w-4 h-4" />,
+      icon: <BookOpen className="w-4 h-4 shrink-0" />,
     },
     {
       id: 'compact',
@@ -878,41 +1217,40 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         book.compactTotalPages > 0
           ? `${book.compactTotalPages} Pages`
           : 'Chapter Summary',
-      icon: <FileText className="w-4 h-4" />,
+      icon: <FileText className="w-4 h-4 shrink-0" />,
     },
     {
       id: 'super_short',
       numberLabel: 'BRIEF',
       shortTitle: 'Executive Overview',
-      icon: <Zap className="w-4 h-4" />,
+      icon: <Zap className="w-4 h-4 shrink-0" />,
     },
     {
       id: 'bullet',
       numberLabel: 'HIGHLIGHTS',
       shortTitle: 'Key Points',
-      icon: <ListChecks className="w-4 h-4" />,
+      icon: <ListChecks className="w-4 h-4 shrink-0" />,
     },
     {
       id: 'audiobook',
       numberLabel: 'AUDIOBOOK',
       shortTitle: 'Chunked TTS',
-      icon: <Headphones className="w-4 h-4" />,
+      icon: <Headphones className="w-4 h-4 shrink-0" />,
     },
   ];
 
-  // Determine explicit summary status badge for current chapter
   const chapterSummaryBadge = (() => {
     if (!currentChapter) return null;
     if (currentChapter.summaryStatus === 'failed') {
       return {
         label: 'AI SUMMARY FAILED — UNCOMPRESSED',
-        className: 'bg-[#E50914] text-white border-[#111]',
+        isAi: false,
       };
     }
     if (currentChapter.summaryMetadata?.status === 'cached') {
       return {
-        label: `CACHED AI SUMMARY (${currentChapter.summaryMetadata.model})`,
-        className: 'bg-[#0047FF] text-white border-[#111]',
+        label: 'CACHED AI SUMMARY',
+        isAi: true,
       };
     }
     if (
@@ -920,245 +1258,728 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       currentChapter.summaryMetadata?.status === 'ai_generated'
     ) {
       return {
-        label: `AI GENERATED (${currentChapter.summaryMetadata?.model || 'gemini-3.8-flash'})`,
-        className: 'bg-[#10B981] text-[#111] border-[#111]',
+        label: 'AI GENERATED SUMMARY',
+        isAi: true,
       };
     }
-    if (book.isPreCompressed !== false || currentChapter.summaryStatus === 'curated_seed') {
+    if (
+      book.isPreCompressed !== false ||
+      currentChapter.summaryStatus === 'curated_seed'
+    ) {
       return {
         label: 'CURATED CLUB EDITION',
-        className: 'bg-[#F6C90E] text-[#111] border-[#111]',
+        isAi: false,
       };
     }
     return {
       label: 'UNCOMPRESSED ORIGINAL',
-      className: 'bg-neutral-200 text-[#111] border-[#111]',
+      isAi: false,
     };
   })();
 
-  return (
-    <section
-      aria-label="Book Reader"
-      data-reading-theme={settings.readingTheme || 'paper'}
-      className={"reader-workspace reader-theme-" + (settings.readingTheme || 'paper') + " bg-reader-paper border-[3px] border-[#111] shadow-brutal-lg rounded-none overflow-hidden flex flex-col " + (focusMode ? 'reader-focus-mode' : '')}
-    >
-      {/* Top Back & Attribution Bar */}
-      <div className="px-4 py-2.5 bg-[#111] text-white border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex gap-1" role="group" aria-label="Reading theme">
-            {(['paper', 'sepia', 'evening'] as const).map((theme) => (
-              <button key={theme} type="button" aria-pressed={(settings.readingTheme || 'paper') === theme} onClick={() => onUpdateSettings({ readingTheme: theme })} className="px-2 py-1 border border-white bg-neutral-800 text-white font-mono-tech text-[10px] uppercase">
-                {theme}
+  const proseContainerStyle: React.CSSProperties = {
+    fontSize: FONT_SIZE_MAP[fontSize],
+    lineHeight: LINE_HEIGHT_MAP[lineHeight],
+    maxWidth: CONTENT_WIDTH_MAP[contentWidth],
+    fontFamily:
+      fontFamily === 'sans' ? 'var(--font-sans)' : 'var(--font-serif)',
+  };
+
+  const paragraphGapStyle: React.CSSProperties = {
+    marginBottom: PARAGRAPH_SPACING_MAP[paragraphSpacing],
+  };
+
+  const overallBookProgressPercent =
+    book.chapters.length > 0
+      ? Math.min(
+          100,
+          Math.max(
+            1,
+            Math.round(
+              ((selectedChapterIdx + chapterScrollPercent / 100) /
+                book.chapters.length) *
+                100
+            )
+          )
+        )
+      : 0;
+
+  // Reusable Typography & Comfort Popover
+  const renderTypographyPanel = () => {
+    if (!isTypographyOpen) return null;
+    return (
+      <div
+        role="dialog"
+        aria-label="Reading typography and appearance settings"
+        className="reader-surface border-2 p-4 shadow-lg space-y-4 text-xs z-50 w-full sm:w-[360px]"
+        style={{ borderColor: 'var(--reader-border-strong)' }}
+      >
+        <div className="flex items-center justify-between pb-2 border-b reader-divider">
+          <span className="font-display-brutal uppercase tracking-wide text-xs reader-text-primary">
+            Reading Comfort & Typography
+          </span>
+          <button
+            type="button"
+            aria-label="Close reading settings"
+            onClick={() => setIsTypographyOpen(false)}
+            className="p-1 reader-control-btn cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Theme Selection */}
+        <div className="space-y-1.5">
+          <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+            Reading Theme
+          </div>
+          <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Theme">
+            {(
+              [
+                { id: 'paper', label: 'Paper' },
+                { id: 'sepia', label: 'Sepia' },
+                { id: 'evening', label: 'Evening' },
+              ] as { id: ReadingTheme; label: string }[]
+            ).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                aria-pressed={activeTheme === t.id}
+                onClick={() => onUpdateSettings({ readingTheme: t.id })}
+                className={`px-2.5 py-1.5 font-mono-tech text-xs font-bold cursor-pointer ${
+                  activeTheme === t.id
+                    ? 'reader-control-btn-active'
+                    : 'reader-control-btn'
+                }`}
+              >
+                {t.label}
               </button>
             ))}
           </div>
-          <button type="button" aria-pressed={focusMode} onClick={() => setFocusMode((value) => !value)} className="px-2 py-1 bg-[#0047FF] text-white border border-white font-mono-tech text-[10px] uppercase">{focusMode ? 'Exit focus (Esc)' : 'Focus reader'}</button>
-          {onBackToCatalog && (
-            <button
-              type="button"
-              onClick={onBackToCatalog}
-              className="px-3 py-1 bg-[#F6C90E] text-[#111] font-display-brutal text-xs uppercase border-2 border-white flex items-center gap-1.5 cursor-pointer hover:bg-[#FFE047]"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Library</span>
-            </button>
-          )}
-          <span
-            className="px-2.5 py-0.5 font-mono-tech text-[11px] font-extrabold uppercase border border-white"
-            style={{
-              backgroundColor: activeBadge.bg,
-              color: activeBadge.text,
-            }}
-          >
-            {activeBadge.label}
-          </span>
-          {canRemoveFromLibrary && onRemoveBookFromLibrary && (
-            <button
-              type="button"
-              onClick={() => onRemoveBookFromLibrary(book.id)}
-              className="px-2.5 py-0.5 bg-[#E50914] hover:bg-[#B8000A] text-white font-mono-tech text-[11px] font-bold uppercase border border-white cursor-pointer"
-            >
-              Remove from Library
-            </button>
-          )}
         </div>
 
-        <span className="font-mono-tech text-xs text-neutral-300 truncate max-w-xl">
-          Source: {book.sourceAttribution || 'The Readers Club Open Literary Archive'}
-        </span>
-      </div>
-
-      {/* Top Book Header Strip with Original Book Poster */}
-      <div
-        className="px-4 py-4 border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-4"
-        style={{ backgroundColor: book.coverColor, color: '#FFFFFF' }}
-      >
-        <div className="flex items-center gap-3.5 min-w-0">
-          <div className="w-12 h-16 sm:w-14 sm:h-20 border-2 border-white shadow-brutal-sm shrink-0 overflow-hidden bg-[#111]">
-            <BookPosterCover
-              title={book.title}
-              author={book.author}
-              coverUrl={book.coverUrl}
-              coverColor={book.coverColor}
-              coverAccent={book.coverAccent}
-            />
+        {/* Font Family */}
+        <div className="space-y-1.5">
+          <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+            Typeface
           </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-xs font-mono-tech uppercase tracking-wider opacity-95">
-              <span>{book.genre}</span>
-              <span aria-hidden="true">·</span>
-              <span>{book.year}</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            {(
+              [
+                { id: 'serif', label: 'Book Serif (Fraunces)' },
+                { id: 'sans', label: 'Clean Sans (Jakarta)' },
+              ] as { id: ReaderFontFamily; label: string }[]
+            ).map((ff) => (
+              <button
+                key={ff.id}
+                type="button"
+                aria-pressed={fontFamily === ff.id}
+                onClick={() => onUpdateSettings({ readerFontFamily: ff.id })}
+                className={`px-2.5 py-1.5 text-xs font-semibold cursor-pointer ${
+                  fontFamily === ff.id
+                    ? 'reader-control-btn-active'
+                    : 'reader-control-btn'
+                }`}
+              >
+                {ff.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Font Size */}
+        <div className="space-y-1.5">
+          <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+            Font Size
+          </div>
+          <div className="grid grid-cols-4 gap-1.5">
+            {(
+              [
+                { id: 'sm', label: 'A−' },
+                { id: 'md', label: 'A' },
+                { id: 'lg', label: 'A+' },
+                { id: 'xl', label: 'A++' },
+              ] as { id: ReaderFontSize; label: string }[]
+            ).map((fs) => (
+              <button
+                key={fs.id}
+                type="button"
+                aria-label={`Font size ${fs.id}`}
+                aria-pressed={fontSize === fs.id}
+                onClick={() => onUpdateSettings({ readerFontSize: fs.id })}
+                className={`px-2 py-1.5 font-mono-tech text-xs font-bold cursor-pointer ${
+                  fontSize === fs.id
+                    ? 'reader-control-btn-active'
+                    : 'reader-control-btn'
+                }`}
+              >
+                {fs.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Line Height */}
+        <div className="space-y-1.5">
+          <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+            Line Spacing
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {(
+              [
+                { id: 'snug', label: 'Snug' },
+                { id: 'relaxed', label: 'Relaxed' },
+                { id: 'loose', label: 'Loose' },
+              ] as { id: ReaderLineHeight; label: string }[]
+            ).map((lh) => (
+              <button
+                key={lh.id}
+                type="button"
+                aria-pressed={lineHeight === lh.id}
+                onClick={() => onUpdateSettings({ readerLineHeight: lh.id })}
+                className={`px-2 py-1.5 font-mono-tech text-xs font-bold cursor-pointer ${
+                  lineHeight === lh.id
+                    ? 'reader-control-btn-active'
+                    : 'reader-control-btn'
+                }`}
+              >
+                {lh.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Paragraph Spacing & Measure */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+              Paragraphs
             </div>
-            <h2 className="font-display-brutal text-xl sm:text-2xl uppercase tracking-tight truncate">
-              {book.title}
-            </h2>
-            <p className="text-xs sm:text-sm font-semibold text-white/90 truncate">
-              by {book.author}
-            </p>
+            <div className="grid grid-cols-3 gap-1">
+              {(
+                [
+                  { id: 'compact', label: 'Tight' },
+                  { id: 'normal', label: 'Normal' },
+                  { id: 'roomy', label: 'Roomy' },
+                ] as { id: ReaderParagraphSpacing; label: string }[]
+              ).map((ps) => (
+                <button
+                  key={ps.id}
+                  type="button"
+                  aria-pressed={paragraphSpacing === ps.id}
+                  onClick={() =>
+                    onUpdateSettings({ readerParagraphSpacing: ps.id })
+                  }
+                  className={`px-1.5 py-1 font-mono-tech text-[11px] font-bold cursor-pointer ${
+                    paragraphSpacing === ps.id
+                      ? 'reader-control-btn-active'
+                      : 'reader-control-btn'
+                  }`}
+                >
+                  {ps.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+              Column Width
+            </div>
+            <div className="grid grid-cols-3 gap-1">
+              {(
+                [
+                  { id: 'narrow', label: 'Narrow' },
+                  { id: 'comfortable', label: 'Book' },
+                  { id: 'wide', label: 'Wide' },
+                ] as { id: ReaderContentWidth; label: string }[]
+              ).map((cw) => (
+                <button
+                  key={cw.id}
+                  type="button"
+                  aria-pressed={contentWidth === cw.id}
+                  onClick={() =>
+                    onUpdateSettings({ readerContentWidth: cw.id })
+                  }
+                  className={`px-1.5 py-1 font-mono-tech text-[11px] font-bold cursor-pointer ${
+                    contentWidth === cw.id
+                      ? 'reader-control-btn-active'
+                      : 'reader-control-btn'
+                  }`}
+                >
+                  {cw.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
-        <div className="bg-[#111] text-[#F6C90E] px-3 py-1.5 border-2 border-white font-mono-tech text-xs font-bold shrink-0">
-          {book.chapters.length > 0
-            ? `${book.chapters.length} ${
-                book.chapterStructure === 'editorial_sections'
-                  ? 'Editorial Sections'
-                  : 'Chapters'
-              } · ${book.originalTotalPages}p Original → ${book.compactTotalPages}p Compact`
-            : availabilityStatus === 'metadata_only'
-            ? 'Catalog Metadata Record (0 Verifiable Chapters)'
-            : 'Verifying Manuscript...'}
-        </div>
-      </div>
-
-      {/* 5 Clean Reading Mode Tabs */}
-      <div
-        role="tablist"
-        aria-label="Reading Format"
-        className="grid grid-cols-2 sm:grid-cols-5 border-b-[3px] border-[#111] bg-[#E5E5E5]"
-      >
-        {summaryModes.map((m) => {
-          const isSelected = activeMode === m.id;
-          return (
+        {/* Discreet Focus-Mode Chapter Action if user needs to summarize current chapter */}
+        {focusMode && currentChapter && (
+          <div className="pt-3 border-t reader-divider space-y-2">
+            <div className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted">
+              Chapter {currentChapter.number} Action
+            </div>
             <button
-              key={m.id}
               type="button"
-              role="tab"
-              aria-selected={isSelected}
-              onClick={() => onSelectMode(m.id)}
-              className={`px-3 py-3 text-left border-r-2 border-b-2 sm:border-b-0 last:border-r-0 border-[#111] transition-colors cursor-pointer flex items-center justify-between gap-2 ${
-                isSelected
-                  ? 'bg-[#F6C90E] text-[#111] font-extrabold'
-                  : 'bg-[#F4F4F0] text-[#222] hover:bg-[#FFF]'
-              }`}
-            >
-              <div>
-                <div className="font-display-brutal text-xs tracking-tight">
-                  {m.numberLabel}
-                </div>
-                <div className="text-[11px] font-mono-tech opacity-80">
-                  {m.shortTitle}
-                </div>
-              </div>
-              {m.icon}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Voice & Detail Level Toolbar */}
-      <div className="px-4 py-2.5 bg-[#ECECEC] border-b-[3px] border-[#111] flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-mono-tech font-bold uppercase text-[#111]">
-            Author Voice:
-          </span>
-          {(
-            [
-              'homelander',
-              'taylor_swift',
-              'deadpool',
-              'gandalf',
-            ] as PresetPersonalityId[]
-          ).map((pid) => {
-            const p = PERSONALITY_PROFILES[pid];
-            const active =
-              !settings.useCustomAuthor && settings.authorPersonality === pid;
-            return (
-              <button
-                key={pid}
-                type="button"
-                onClick={() =>
-                  onUpdateSettings({
-                    authorPersonality: pid,
-                    useCustomAuthor: false,
-                  })
+              disabled={isAiRewriting || isBatchCompressing}
+              onClick={() => {
+                setIsTypographyOpen(false);
+                if (activeMode === 'original') {
+                  onSelectMode('compact');
                 }
-                className={`px-2.5 py-1 border-2 border-[#111] font-bold transition-transform cursor-pointer whitespace-nowrap ${
-                  active
-                    ? 'bg-[#111] text-[#F6C90E] -translate-y-0.5'
-                    : 'bg-white text-[#111] hover:bg-[#F6C90E]/30'
-                }`}
-              >
-                {p.name}
-              </button>
-            );
-          })}
-
-          <span className="font-mono-tech font-bold uppercase text-[#111] ml-1">
-            Detail:
-          </span>
-          {(['compact', 'detailed', 'bullet'] as SummaryDetailLevel[]).map(
-            (lvl) => (
-              <button
-                key={lvl}
-                type="button"
-                onClick={() => onUpdateSettings({ summaryDetailLevel: lvl })}
-                className={`px-2 py-1 border-2 border-[#111] font-mono-tech text-[11px] font-bold uppercase cursor-pointer ${
-                  detailLevel === lvl
-                    ? 'bg-[#0047FF] text-white'
-                    : 'bg-white text-[#111] hover:bg-neutral-100'
-                }`}
-              >
-                {lvl}
-              </button>
-            )
-          )}
-
-          <button
-            type="button"
-            onClick={onOpenSettingsTab}
-            className="px-2.5 py-1 border-2 border-[#111] bg-white hover:bg-[#F6C90E] text-[#111] font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap"
-          >
-            <Sliders className="w-3.5 h-3.5" />
-            <span>Voices</span>
-          </button>
-        </div>
-
-        {currentChapter && (
-          <button
-            type="button"
-            onClick={handleCompressCurrentChapter}
-            disabled={isAiRewriting || isBatchCompressing}
-            className="px-3.5 py-1.5 bg-[#E50914] hover:bg-[#B8000A] text-white border-2 border-[#111] shadow-brutal-sm font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>
-              {isAiRewriting
-                ? 'Requesting AI Summary...'
-                : `AI Summarize Ch.${currentChapter.number} (${activeAuthorDisplayName})`}
-            </span>
-          </button>
+                void handleCompressCurrentChapter(true);
+              }}
+              className="w-full px-3 py-2 reader-control-btn font-mono-tech text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>
+                {isAiRewriting
+                  ? 'Summarizing Chapter...'
+                  : `Summarize Ch. ${currentChapter.number} (${activeAuthorDisplayName})`}
+              </span>
+            </button>
+          </div>
         )}
       </div>
+    );
+  };
 
-      {/* Status & Honest AI Failure Banners */}
+  return (
+    <section
+      ref={readerSectionRef}
+      data-testid="reader-workspace"
+      aria-label="Book Reader"
+      data-reading-theme={activeTheme}
+      data-focus-mode={focusMode ? 'true' : 'false'}
+      className={`reader-workspace reader-theme-${activeTheme} border-[3px] shadow-brutal-lg rounded-none overflow-hidden flex flex-col ${
+        focusMode ? 'reader-focus-mode' : ''
+      }`}
+    >
+      {/* =====================================================================
+          1. FOCUS MODE: SUBTLE PROGRESS BAR + MINIMAL AUTO-HIDING TOOLBAR
+         ===================================================================== */}
+      {focusMode && (
+        <>
+          <div
+            role="progressbar"
+            aria-label="Reading progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={overallBookProgressPercent}
+            className="sticky top-0 left-0 right-0 z-30 h-1 w-full"
+            style={{ backgroundColor: 'var(--reader-progress-track)' }}
+          >
+            <div
+              className="h-full transition-all duration-200"
+              style={{
+                width: `${overallBookProgressPercent}%`,
+                backgroundColor: 'var(--reader-progress-fill)',
+              }}
+            />
+          </div>
+
+          <div
+            role="toolbar"
+            data-testid="focus-reader-toolbar"
+            aria-label="Focus reading controls"
+            onMouseEnter={() => setIsFocusToolbarVisible(true)}
+            className={`sticky top-1 z-20 px-4 sm:px-6 py-2 border-b reader-divider flex flex-wrap items-center justify-between gap-2 transition-opacity duration-200 ${
+              isFocusToolbarVisible || isTypographyOpen
+                ? 'opacity-100'
+                : 'opacity-0 pointer-events-none focus-within:opacity-100 focus-within:pointer-events-auto'
+            }`}
+            style={{
+              backgroundColor: 'var(--reader-toolbar-bg)',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-mono-tech text-xs font-semibold reader-text-secondary truncate max-w-[180px] sm:max-w-xs">
+                {book.title}
+              </span>
+              {currentChapter && (
+                <>
+                  <span aria-hidden="true" className="reader-text-muted">
+                    ·
+                  </span>
+                  <span className="font-mono-tech text-xs reader-text-muted truncate max-w-[160px] sm:max-w-xs">
+                    Ch. {currentChapter.number} of {book.chapters.length}
+                  </span>
+                </>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 relative">
+              <div
+                className="flex items-center gap-1"
+                role="group"
+                aria-label="Reading theme"
+              >
+                {(['paper', 'sepia', 'evening'] as const).map((theme) => (
+                  <button
+                    key={theme}
+                    type="button"
+                    aria-pressed={activeTheme === theme}
+                    onClick={() => onUpdateSettings({ readingTheme: theme })}
+                    className={`px-2 py-1 font-mono-tech text-[11px] uppercase cursor-pointer ${
+                      activeTheme === theme
+                        ? 'reader-control-btn-active font-bold'
+                        : 'reader-control-btn'
+                    }`}
+                  >
+                    {theme}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                aria-label="Reading typography settings"
+                aria-expanded={isTypographyOpen}
+                onClick={() => setIsTypographyOpen((v) => !v)}
+                className={`px-2.5 py-1 font-mono-tech text-xs font-bold flex items-center gap-1 cursor-pointer ${
+                  isTypographyOpen
+                    ? 'reader-control-btn-active'
+                    : 'reader-control-btn'
+                }`}
+              >
+                <Type className="w-3.5 h-3.5" />
+                <span>Aa</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="focus-exit-button"
+                aria-pressed={focusMode}
+                onClick={() => handleSetFocusMode(false)}
+                className="px-2.5 py-1 reader-control-btn font-mono-tech text-[11px] font-bold uppercase flex items-center gap-1 cursor-pointer"
+              >
+                <Minimize2 className="w-3.5 h-3.5" />
+                <span>Exit focus (Esc)</span>
+              </button>
+
+              {isTypographyOpen && (
+                <div className="absolute right-0 top-full mt-2 z-50">
+                  {renderTypographyPanel()}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* =====================================================================
+          2. NORMAL MODE CHROME (COMPLETELY HIDDEN IN FOCUS MODE)
+         ===================================================================== */}
+      {!focusMode && (
+        <>
+          {/* Top Utility & Attribution Bar */}
+          <div className="px-3 sm:px-5 py-2.5 reader-surface-muted border-b-2 reader-divider flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {onBackToCatalog && (
+                <button
+                  type="button"
+                  onClick={onBackToCatalog}
+                  className="px-2.5 py-1 reader-control-btn font-display-brutal text-xs uppercase flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Library</span>
+                </button>
+              )}
+
+              <span
+                className="px-2 py-0.5 font-mono-tech text-[10px] sm:text-[11px] font-extrabold uppercase border border-[#111]"
+                style={{
+                  backgroundColor: activeBadge.bg,
+                  color: activeBadge.text,
+                }}
+              >
+                {activeBadge.label}
+              </span>
+
+              {canRemoveFromLibrary && onRemoveBookFromLibrary && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveBookFromLibrary(book.id)}
+                  title="Remove this book from library"
+                  className="px-2.5 py-1 bg-[#E50914] hover:bg-[#B8000A] text-white font-mono-tech text-[11px] font-bold uppercase border border-[#111] cursor-pointer"
+                >
+                  Remove from Library
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 relative">
+              <div
+                className="flex items-center gap-1"
+                role="group"
+                aria-label="Reading theme"
+              >
+                {(['paper', 'sepia', 'evening'] as const).map((theme) => (
+                  <button
+                    key={theme}
+                    type="button"
+                    data-testid={`theme-option-${theme}`}
+                    aria-pressed={activeTheme === theme}
+                    onClick={() => onUpdateSettings({ readingTheme: theme })}
+                    className={`px-2 py-1 font-mono-tech text-[11px] uppercase cursor-pointer ${
+                      activeTheme === theme
+                        ? 'reader-control-btn-active font-bold'
+                        : 'reader-control-btn'
+                    }`}
+                  >
+                    {theme}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                aria-label="Reading typography settings"
+                aria-expanded={isTypographyOpen}
+                onClick={() => setIsTypographyOpen((v) => !v)}
+                className={`px-2.5 py-1 font-mono-tech text-xs font-bold flex items-center gap-1 cursor-pointer ${
+                  isTypographyOpen
+                    ? 'reader-control-btn-active'
+                    : 'reader-control-btn'
+                }`}
+              >
+                <Type className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Appearance</span>
+                <span className="sm:hidden">Aa</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="enter-focus-mode-button"
+                aria-pressed={focusMode}
+                onClick={() => handleSetFocusMode(true)}
+                className="px-2.5 py-1 reader-accent-btn font-mono-tech text-[11px] font-bold uppercase flex items-center gap-1.5 cursor-pointer"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>Focus reader</span>
+              </button>
+
+              {isTypographyOpen && (
+                <div className="fixed inset-x-3 top-20 sm:absolute sm:inset-auto sm:right-0 sm:top-full sm:mt-2 z-50">
+                  {renderTypographyPanel()}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Book Identity Banner */}
+          <div
+            data-testid="reader-book-banner"
+            className="px-4 sm:px-6 py-3.5 reader-surface border-b-2 reader-divider flex flex-wrap items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-14 sm:w-12 sm:h-16 border border-[#111] shrink-0 overflow-hidden bg-[#111]">
+                <BookPosterCover
+                  title={book.title}
+                  author={book.author}
+                  coverUrl={book.coverUrl}
+                  coverColor={book.coverColor}
+                  coverAccent={book.coverAccent}
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono-tech uppercase tracking-wider reader-text-muted">
+                  <span>{book.genre}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{book.year}</span>
+                  <span aria-hidden="true" className="hidden md:inline">
+                    ·
+                  </span>
+                  <span className="hidden md:inline truncate max-w-sm">
+                    {book.sourceAttribution ||
+                      'The Readers Club Open Literary Archive'}
+                  </span>
+                </div>
+                <h2 className="font-display-brutal text-lg sm:text-xl uppercase tracking-tight reader-text-primary truncate">
+                  {book.title}
+                </h2>
+                <p className="text-xs sm:text-sm font-medium reader-text-secondary truncate">
+                  by {book.author}
+                </p>
+              </div>
+            </div>
+
+            <div className="reader-surface-muted reader-text-primary px-3 py-1.5 border reader-divider font-mono-tech text-xs font-bold shrink-0">
+              {book.chapters.length > 0
+                ? `${book.chapters.length} ${
+                    book.chapterStructure === 'editorial_sections'
+                      ? 'Editorial Sections'
+                      : 'Chapters'
+                  } · ${book.originalTotalPages}p Original → ${
+                    book.compactTotalPages
+                  }p Compact`
+                : availabilityStatus === 'metadata_only'
+                ? 'Catalog Metadata Record (0 Verifiable Chapters)'
+                : 'Verifying Manuscript...'}
+            </div>
+          </div>
+
+          {/* 5 Reading Format Tabs */}
+          <div
+            role="tablist"
+            data-testid="reader-mode-strip"
+            aria-label="Reading Format"
+            className="grid grid-cols-2 sm:grid-cols-5 border-b-2 reader-divider reader-surface-muted"
+          >
+            {summaryModes.map((m) => {
+              const isSelected = activeMode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isSelected}
+                  onClick={() => onSelectMode(m.id)}
+                  className={`px-3 py-2.5 text-left border-r border-b sm:border-b-0 last:border-r-0 reader-divider transition-colors cursor-pointer flex items-center justify-between gap-2 ${
+                    isSelected
+                      ? 'reader-control-btn-active font-extrabold'
+                      : 'reader-surface reader-text-secondary hover:opacity-90'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="font-display-brutal text-xs tracking-tight truncate">
+                      {m.numberLabel}
+                    </div>
+                    <div className="text-[11px] font-mono-tech opacity-80 truncate">
+                      {m.shortTitle}
+                    </div>
+                  </div>
+                  {m.icon}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Generation Preferences Bar (Separated from Chapter Summarization Action!) */}
+          <div className="px-3 sm:px-5 py-2 reader-surface-muted border-b-2 reader-divider text-xs">
+            <div className="flex items-center justify-between gap-2 sm:hidden">
+              <div className="font-mono-tech text-[11px] font-bold reader-text-secondary truncate">
+                Voice: <span className="reader-text-primary">{activeAuthorDisplayName}</span> · Detail: <span className="uppercase reader-text-primary">{detailLevel}</span>
+              </div>
+              <button
+                type="button"
+                aria-expanded={isMobilePrefsOpen}
+                onClick={() => setIsMobilePrefsOpen((v) => !v)}
+                className="px-2.5 py-1 reader-control-btn font-mono-tech text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Sliders className="w-3 h-3" />
+                <span>Preferences</span>
+                {isMobilePrefsOpen ? (
+                  <ChevronUp className="w-3 h-3" />
+                ) : (
+                  <ChevronDown className="w-3 h-3" />
+                )}
+              </button>
+            </div>
+
+            <div
+              className={`${
+                isMobilePrefsOpen ? 'flex mt-2.5 pt-2.5 border-t reader-divider' : 'hidden sm:flex'
+              } flex-wrap items-center justify-between gap-2.5`}
+            >
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted mr-1">
+                  Adapter Voice:
+                </span>
+                {(
+                  [
+                    'homelander',
+                    'taylor_swift',
+                    'deadpool',
+                    'gandalf',
+                  ] as PresetPersonalityId[]
+                ).map((pid) => {
+                  const p = PERSONALITY_PROFILES[pid];
+                  const active =
+                    !settings.useCustomAuthor &&
+                    settings.authorPersonality === pid;
+                  return (
+                    <button
+                      key={pid}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() =>
+                        onUpdateSettings({
+                          authorPersonality: pid,
+                          useCustomAuthor: false,
+                        })
+                      }
+                      className={`px-2.5 py-1 text-xs font-bold cursor-pointer whitespace-nowrap ${
+                        active
+                          ? 'reader-control-btn-active'
+                          : 'reader-control-btn'
+                      }`}
+                    >
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-mono-tech text-[11px] font-bold uppercase reader-text-muted mr-1">
+                  Summary Detail:
+                </span>
+                {(['compact', 'detailed', 'bullet'] as SummaryDetailLevel[]).map(
+                  (lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      aria-pressed={detailLevel === lvl}
+                      onClick={() =>
+                        onUpdateSettings({ summaryDetailLevel: lvl })
+                      }
+                      className={`px-2 py-1 font-mono-tech text-[11px] font-bold uppercase cursor-pointer ${
+                        detailLevel === lvl
+                          ? 'reader-control-btn-active'
+                          : 'reader-control-btn'
+                      }`}
+                    >
+                      {lvl}
+                    </button>
+                  )
+                )}
+
+                <button
+                  type="button"
+                  onClick={onOpenSettingsTab}
+                  className="px-2.5 py-1 reader-control-btn font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap ml-1"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>Custom Voices</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* =====================================================================
+          3. STATUS & HONEST AI ERROR BANNERS
+         ===================================================================== */}
       {aiStatusBanner && (
-        <div className="px-4 py-2 bg-[#111] text-[#F6C90E] font-mono-tech text-xs flex items-center justify-between">
-          <span>{aiStatusBanner}</span>
+        <div className="px-4 py-2 reader-surface-muted border-b reader-divider font-mono-tech text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {isAiRewriting || isBatchCompressing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin reader-accent-text shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 reader-accent-text shrink-0" />
+            )}
+            <span className="reader-text-primary truncate">
+              {aiStatusBanner}
+            </span>
+          </div>
           <button
             type="button"
             onClick={() => setAiStatusBanner(null)}
-            className="underline ml-4 cursor-pointer"
+            className="underline reader-text-muted hover:reader-text-primary cursor-pointer shrink-0"
           >
             Dismiss
           </button>
@@ -1168,20 +1989,22 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
       {aiErrorBanner && (
         <div
           role="alert"
-          className="px-4 py-3 bg-[#7F1D1D] text-white border-b-[3px] border-[#111] font-mono-tech text-xs flex flex-wrap items-center justify-between gap-3"
+          className="px-4 py-3 bg-[#7F1D1D] text-white border-b-2 reader-divider font-mono-tech text-xs flex flex-wrap items-center justify-between gap-3"
         >
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-[#FDE047] shrink-0" />
             <span>
               <strong>AI Summarization Unavailable:</strong> {aiErrorBanner}{' '}
-              (Chapter kept uncompressed; no synthetic fallback text was substituted.)
+              (Chapter kept uncompressed; no synthetic fallback text was
+              substituted.)
             </span>
           </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={handleCompressCurrentChapter}
-              className="px-2.5 py-1 bg-[#F6C90E] text-[#111] font-bold border border-white cursor-pointer"
+              disabled={isAiRewriting}
+              onClick={() => void handleCompressCurrentChapter(true)}
+              className="px-2.5 py-1 bg-[#F6C90E] text-[#111] font-bold border border-white cursor-pointer disabled:opacity-50"
             >
               Retry AI Request
             </button>
@@ -1196,782 +2019,1067 @@ export const ReaderWorkspace: React.FC<ReaderWorkspaceProps> = ({
         </div>
       )}
 
-      {/* SPECIAL CASE 1: LOADING PROJECT GUTENBERG FULL TEXT */}
+      {/* =====================================================================
+          4. SPECIAL CASE 1: LOADING PROJECT GUTENBERG FULL TEXT
+         ===================================================================== */}
       {isLoadingGutenbergText && (
-        <div className="p-12 bg-reader-paper flex flex-col items-center justify-center text-center space-y-3">
-          <Loader2 className="w-9 h-9 animate-spin text-[#0047FF]" />
-          <h3 className="font-display-brutal text-lg uppercase text-[#111]">
+        <div className="p-12 flex flex-col items-center justify-center text-center space-y-3">
+          <Loader2 className="w-9 h-9 animate-spin reader-accent-text" />
+          <h3 className="font-display-brutal text-lg uppercase reader-text-primary">
             Retrieving Authentic Public-Domain Manuscript
           </h3>
-          <p className="text-xs sm:text-sm font-mono-tech text-[#444] max-w-md">
-            Fetching complete chapter text for {book.title} (Project Gutenberg #{book.gutenbergId})...
+          <p className="text-xs sm:text-sm font-mono-tech reader-text-secondary max-w-md">
+            Fetching complete chapter text for {book.title} (Project Gutenberg #
+            {book.gutenbergId})...
           </p>
         </div>
       )}
 
-      {/* SPECIAL CASE 2: METADATA ONLY / EXTRACTION FAILED / NO CHAPTERS */}
-      {!isLoadingGutenbergText && (!currentChapter || book.chapters.length === 0) && (
-        <div className="p-8 sm:p-10 bg-reader-paper space-y-6">
-          <div className="max-w-2xl mx-auto bg-white border-[3px] border-[#111] shadow-brutal-lg p-6 space-y-4">
-            <div className="flex items-center gap-3">
-              {availabilityStatus === 'extraction_failed' || gutenbergFetchError ? (
-                <FileWarning className="w-7 h-7 text-[#E50914] shrink-0" />
-              ) : (
-                <Database className="w-7 h-7 text-[#F97316] shrink-0" />
-              )}
-              <div>
-                <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                  {availabilityStatus === 'extraction_failed' || gutenbergFetchError
-                    ? 'Manuscript Extraction Failed'
-                    : 'Catalog Metadata Record Only'}
-                </span>
-                <h3 className="font-display-brutal text-xl uppercase text-[#111]">
-                  {book.title} — Full Manuscript Not Attached
-                </h3>
+      {/* =====================================================================
+          5. SPECIAL CASE 2: METADATA ONLY / EXTRACTION FAILED / NO CHAPTERS
+         ===================================================================== */}
+      {!isLoadingGutenbergText &&
+        (!currentChapter || book.chapters.length === 0) && (
+          <div className="p-6 sm:p-10 space-y-6">
+            <div className="max-w-2xl mx-auto reader-surface border-2 reader-divider p-6 space-y-4">
+              <div className="flex items-center gap-3">
+                {availabilityStatus === 'extraction_failed' ||
+                gutenbergFetchError ? (
+                  <FileWarning className="w-7 h-7 reader-accent-text shrink-0" />
+                ) : (
+                  <Database className="w-7 h-7 reader-accent-text shrink-0" />
+                )}
+                <div>
+                  <span className="font-mono-tech text-xs font-bold uppercase reader-accent-text">
+                    {availabilityStatus === 'extraction_failed' ||
+                    gutenbergFetchError
+                      ? 'Manuscript Extraction Failed'
+                      : 'Catalog Metadata Record Only'}
+                  </span>
+                  <h3 className="font-display-brutal text-xl uppercase reader-text-primary">
+                    {book.title} — Full Manuscript Not Attached
+                  </h3>
+                </div>
               </div>
-            </div>
 
-            <p className="text-sm text-[#222] leading-relaxed font-medium">
-              {gutenbergFetchError ||
-                book.extractionError ||
-                `This entry was discovered via ${
-                  book.sourceAttribution || 'Google Books Discovery Catalog'
-                }. Because full public-domain text is not available from this discovery record, The Readers Club never fabricates synthetic chapters from a book description.`}
-            </p>
-
-            <div className="p-4 bg-[#F3EFE6] border-2 border-[#111] space-y-1.5">
-              <div className="font-mono-tech text-xs font-bold uppercase text-[#111]">
-                Verified Catalog Synopsis
-              </div>
-              <p className="font-editorial text-sm text-[#222] leading-relaxed">
-                {book.tagline || book.superShortExecutiveSummary.thesis}
+              <p className="text-sm reader-text-secondary leading-relaxed font-medium">
+                {gutenbergFetchError ||
+                  book.extractionError ||
+                  `This entry was discovered via ${
+                    book.sourceAttribution || 'Google Books Discovery Catalog'
+                  }. Because full public-domain text is not available from this discovery record, The Readers Club never fabricates synthetic chapters from a book description.`}
               </p>
-            </div>
 
-            <div className="flex flex-wrap items-center gap-3 pt-2">
-              {book.gutenbergId && (
-                <button
-                  type="button"
-                  onClick={() => void fetchGutenbergManuscript()}
-                  className="px-4 py-2 bg-[#0047FF] text-white border-2 border-[#111] shadow-brutal-sm font-display-brutal text-xs uppercase flex items-center gap-1.5 cursor-pointer"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Retry Gutenberg Retrieval</span>
-                </button>
-              )}
-              {onOpenUploadTab && (
-                <button
-                  type="button"
-                  onClick={onOpenUploadTab}
-                  className="px-4 py-2 bg-[#F6C90E] text-[#111] border-2 border-[#111] shadow-brutal-sm font-display-brutal text-xs uppercase cursor-pointer"
-                >
-                  Upload Your Own EPUB / PDF Copy →
-                </button>
-              )}
-              {onBackToCatalog && (
-                <button
-                  type="button"
-                  onClick={onBackToCatalog}
-                  className="px-4 py-2 bg-[#111] text-white border-2 border-[#111] font-display-brutal text-xs uppercase cursor-pointer"
-                >
-                  Browse Full-Text Public Domain Books
-                </button>
-              )}
+              <div className="p-4 reader-surface-muted border reader-divider space-y-1.5">
+                <div className="font-mono-tech text-xs font-bold uppercase reader-text-muted">
+                  Verified Catalog Synopsis
+                </div>
+                <p className="font-editorial text-sm reader-text-primary leading-relaxed reader-prose">
+                  {book.tagline || book.superShortExecutiveSummary.thesis}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                {book.gutenbergId && (
+                  <button
+                    type="button"
+                    onClick={() => void fetchGutenbergManuscript()}
+                    className="px-4 py-2 reader-accent-btn font-display-brutal text-xs uppercase flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Retry Gutenberg Retrieval</span>
+                  </button>
+                )}
+                {onOpenUploadTab && (
+                  <button
+                    type="button"
+                    onClick={onOpenUploadTab}
+                    className="px-4 py-2 reader-control-btn font-display-brutal text-xs uppercase cursor-pointer"
+                  >
+                    Upload Your Own EPUB / PDF Copy →
+                  </button>
+                )}
+                {onBackToCatalog && (
+                  <button
+                    type="button"
+                    onClick={onBackToCatalog}
+                    className="px-4 py-2 reader-control-btn font-display-brutal text-xs uppercase cursor-pointer"
+                  >
+                    Browse Full-Text Public Domain Books
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* MAIN READER BODY WHEN VERIFIED CHAPTERS EXIST */}
-      {!isLoadingGutenbergText && currentChapter && book.chapters.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 min-h-[500px]">
-          {/* Left Chapters List */}
-          <aside
-            aria-label="Chapters"
-            className="lg:col-span-4 border-b-[3px] lg:border-b-0 lg:border-r-[3px] border-[#111] bg-[#F3EFE6] p-3 flex flex-col justify-between"
+      {/* =====================================================================
+          6. MAIN READER BODY WHEN VERIFIED CHAPTERS EXIST
+         ===================================================================== */}
+      {!isLoadingGutenbergText &&
+        currentChapter &&
+        book.chapters.length > 0 && (
+          <div
+            className={
+              focusMode
+                ? 'flex-1 flex flex-col'
+                : 'grid grid-cols-1 lg:grid-cols-12 min-h-[540px]'
+            }
           >
-            <div>
-              <div className="flex items-center justify-between pb-2 mb-2 border-b-2 border-[#111]">
-                <span className="font-display-brutal text-xs uppercase tracking-wider">
-                  {book.chapterStructure === 'editorial_sections'
-                    ? `SECTIONS (${book.chapters.length})`
-                    : `CHAPTERS (${book.chapters.length})`}
-                </span>
-                {compressedChaptersCount < book.chapters.length && (
-                  <button
-                    type="button"
-                    onClick={handleCompressAllChaptersSequentially}
-                    disabled={isBatchCompressing}
-                    className="text-[11px] font-mono-tech font-bold text-[#0047FF] hover:underline cursor-pointer"
-                  >
-                    {isBatchCompressing
-                      ? 'Summarizing all...'
-                      : 'AI Summarize All'}
-                  </button>
-                )}
-              </div>
-
-              <div className="space-y-1.5 max-h-[430px] overflow-y-auto pr-1">
-                {book.chapters.map((ch, idx) => {
-                  const isSelected = idx === selectedChapterIdx;
-                  const chCompressed = isChapterCompressed(ch);
-                  const chFailed = ch.summaryStatus === 'failed';
-                  return (
-                    <button
-                      key={ch.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedChapterIdx(idx);
-                      }}
-                      className={`w-full text-left p-2.5 border-2 border-[#111] transition-all cursor-pointer flex items-center justify-between gap-2 ${
-                        isSelected
-                          ? 'bg-[#111] text-white shadow-brutal-sm'
-                          : 'bg-white text-[#111] hover:bg-[#F6C90E]/25'
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 font-mono-tech text-[10px] uppercase opacity-75">
-                          <span>
-                            {book.chapterStructure === 'editorial_sections'
-                              ? `Section ${ch.number}`
-                              : `Chapter ${ch.number}`}
-                          </span>
-                          {ch.pageStart && ch.pageEnd && (
-                            <span>
-                              (pp. {ch.pageStart}–{ch.pageEnd})
-                            </span>
-                          )}
-                          {chCompressed && (
-                            <CheckCircle2 className="w-3 h-3 text-[#10B981] inline" />
-                          )}
-                          {chFailed && (
-                            <AlertTriangle className="w-3 h-3 text-[#E50914] inline" />
-                          )}
-                        </div>
-                        <div className="font-bold text-xs leading-snug line-clamp-1 mt-0.5">
-                          {ch.title.replace(/^Chapter\s+\d+[:.-]?\s*/i, '')}
-                        </div>
-                      </div>
-                      <span
-                        className={`font-mono-tech text-[11px] font-bold px-1.5 py-0.5 border shrink-0 ${
-                          isSelected
-                            ? 'bg-[#F6C90E] text-[#111] border-[#F6C90E]'
-                            : 'bg-[#F3EFE6] text-[#111] border-[#111]'
-                        }`}
-                      >
-                        {ch.compactPages}p
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </aside>
-
-          {/* Right Reading / Listening Pane */}
-          <div className="lg:col-span-8 p-5 sm:p-6 flex flex-col justify-between bg-reader-paper">
-            {/* MODE 1: ORIGINAL */}
-            {activeMode === 'original' && (
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
-                  <div>
-                    <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                      {book.chapterStructure === 'editorial_sections'
-                        ? `Condensed Editorial Excerpt · Section ${currentChapter.number}`
-                        : `Original Manuscript · Chapter ${currentChapter.number}`}
-                      {currentChapter.pageStart && currentChapter.pageEnd
-                        ? ` (PDF Pages ${currentChapter.pageStart}–${currentChapter.pageEnd})`
-                        : ''}
-                    </span>
-                    <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
-                      {currentChapter.title}
-                    </h3>
-                  </div>
-                  <span className="font-mono-tech text-xs font-bold bg-[#111] text-white px-2.5 py-1">
-                    {currentChapter.originalPages} Pages
+            {/* Mobile & Tablet Compact Chapter Bar (hidden on desktop and hidden in focus mode) */}
+            {!focusMode && (
+              <div className="lg:hidden px-3 sm:px-5 py-2.5 reader-surface border-b reader-divider flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  aria-expanded={isMobileChaptersOpen}
+                  onClick={() => setIsMobileChaptersOpen((v) => !v)}
+                  className="px-3 py-1.5 reader-control-btn font-mono-tech text-xs font-bold flex items-center gap-1.5 cursor-pointer min-w-0"
+                >
+                  <BookOpen className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">
+                    {book.chapterStructure === 'editorial_sections'
+                      ? `Section ${currentChapter.number}/${book.chapters.length}`
+                      : `Chapter ${currentChapter.number}/${book.chapters.length}`}
+                    : {currentChapter.title.replace(/^Chapter\s+\d+[:.-]?\s*/i, '')}
                   </span>
-                </div>
-
-                {book.availabilityStatus === 'condensed_edition' &&
-                  book.gutenbergId && (
-                    <div className="p-3 bg-[#F6C90E]/30 border-2 border-[#111] flex flex-wrap items-center justify-between gap-3 text-xs">
-                      <div>
-                        <span className="font-bold">
-                          Curated Condensed Edition ({book.chapters.length} Editorial Sections):
-                        </span>{' '}
-                        Full unabridged public-domain chapters are available from Project Gutenberg (#{book.gutenbergId}).
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void fetchGutenbergManuscript()}
-                        className="px-3 py-1 bg-[#111] text-[#F6C90E] font-mono-tech font-bold border border-[#111] cursor-pointer shrink-0 hover:bg-[#222]"
-                      >
-                        Load Unabridged Gutenberg Text →
-                      </button>
-                    </div>
+                  {isMobileChaptersOpen ? (
+                    <ChevronUp className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 shrink-0" />
                   )}
+                </button>
 
-                <div className="space-y-4 font-editorial text-base leading-relaxed text-[#18181B]">
-                  {currentChapter.originalText.map((para, i) => (
-                    <p
-                      key={i}
-                      className="first-letter:font-bold first-letter:text-lg"
-                    >
-                      {para}
-                    </p>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* MODE 2: COMPACT */}
-            {activeMode === 'compact' && (
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono-tech text-xs font-bold uppercase text-[#0047FF]">
-                        Compact Summary · Chapter {currentChapter.number} of{' '}
-                        {book.chapters.length}
-                      </span>
-                      {chapterSummaryBadge && (
-                        <span
-                          className={`px-2 py-0.5 font-mono-tech text-[10px] font-bold border ${chapterSummaryBadge.className}`}
-                        >
-                          {chapterSummaryBadge.label}
-                        </span>
-                      )}
-                    </div>
-                    <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-1">
-                      {currentChapter.title}
-                    </h3>
-                  </div>
-                  <div className="font-mono-tech text-xs font-bold bg-[#F6C90E] text-[#111] border-2 border-[#111] px-2.5 py-1">
-                    {currentChapter.compactPages} Pages
-                  </div>
-                </div>
-
-                {/* Active Author Card */}
-                <div className="flex items-center gap-3 p-3 bg-white border-2 border-[#111] shadow-brutal-sm">
-                  <div className="w-12 h-12 border-2 border-[#111] shrink-0 overflow-hidden">
-                    <PersonaPortraitSvg personaId={settings.authorPersonality} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-bold uppercase tracking-wide text-[#111]">
-                      Adapter Persona: {activeAuthorDisplayName}
-                    </div>
-                    <p className="text-xs text-[#444] truncate mt-0.5">
-                      {authorProfile.tagline}
-                    </p>
-                  </div>
+                <div className="flex items-center gap-1 shrink-0">
                   <button
                     type="button"
-                    onClick={() => onSelectMode('audiobook')}
-                    className="px-3 py-1.5 bg-[#111] text-[#F6C90E] font-mono-tech text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0 hover:bg-[#333]"
+                    aria-label="Previous chapter"
+                    disabled={selectedChapterIdx === 0}
+                    onClick={() =>
+                      setSelectedChapterIdx((i) => Math.max(0, i - 1))
+                    }
+                    className="p-1.5 reader-control-btn cursor-pointer disabled:opacity-40"
                   >
-                    <Headphones className="w-3.5 h-3.5" />
-                    <span>Listen</span>
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Next chapter"
+                    disabled={selectedChapterIdx >= book.chapters.length - 1}
+                    onClick={() =>
+                      setSelectedChapterIdx((i) =>
+                        Math.min(book.chapters.length - 1, i + 1)
+                      )
+                    }
+                    className="p-1.5 reader-control-btn cursor-pointer disabled:opacity-40"
+                  >
+                    <ChevronRight className="w-4 h-4" />
                   </button>
                 </div>
+              </div>
+            )}
 
-                {!currentChapterIsCompressed ? (
-                  <div className="p-6 bg-white border-[3px] border-[#111] shadow-brutal text-center space-y-4 my-4">
-                    <h4 className="font-display-brutal text-lg uppercase text-[#111]">
-                      {currentChapter.summaryStatus === 'failed'
-                        ? `AI Summarization Failed for ${currentChapter.title}`
-                        : `Generate AI Summary for ${currentChapter.title}`}
-                    </h4>
-                    <p className="text-sm text-[#333] max-w-md mx-auto">
-                      {currentChapter.summaryStatus === 'failed'
-                        ? currentChapter.summaryErrorMessage ||
-                          'The AI summarization request could not be completed. The chapter remains uncompressed so we never show fake AI output.'
-                        : `Condense this ${currentChapter.originalPages}-page chapter into a ${currentChapter.compactPages}-page ${detailLevel} summary written in ${activeAuthorDisplayName}’s voice.`}
-                    </p>
-                    <div className="flex flex-wrap items-center justify-center gap-3">
+            {/* Left Chapters Sidebar (Hidden completely in Focus Mode; collapsible on Mobile/Tablet/Desktop) */}
+            {!focusMode && (
+              <aside
+                data-testid="reader-chapter-sidebar"
+                aria-label="Chapters"
+                className={`${
+                  isMobileChaptersOpen ? 'flex' : 'hidden'
+                } ${
+                  isDesktopSidebarOpen
+                    ? 'lg:flex lg:col-span-4 xl:col-span-3'
+                    : 'lg:hidden'
+                } border-b-2 lg:border-b-0 lg:border-r-2 reader-divider reader-surface-muted p-3 sm:p-4 flex-col justify-between`}
+              >
+                <div>
+                  <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b reader-divider">
+                    <span className="font-display-brutal text-xs uppercase tracking-wider reader-text-primary">
+                      {book.chapterStructure === 'editorial_sections'
+                        ? `SECTIONS (${book.chapters.length})`
+                        : `CHAPTERS (${book.chapters.length})`}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {compressedChaptersCount < book.chapters.length && (
+                        <button
+                          type="button"
+                          onClick={() => void handleCompressAllChaptersSequentially()}
+                          disabled={isBatchCompressing || isAiRewriting}
+                          className="text-[11px] font-mono-tech font-bold reader-accent-text hover:underline cursor-pointer disabled:opacity-50"
+                        >
+                          {isBatchCompressing
+                            ? 'Summarizing all...'
+                            : 'Summarize All'}
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={handleCompressCurrentChapter}
-                        disabled={isAiRewriting}
-                        className="px-5 py-2.5 bg-[#E50914] hover:bg-[#B8000A] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm flex items-center gap-2 cursor-pointer"
+                        aria-label="Collapse chapter list"
+                        onClick={() => {
+                          setIsDesktopSidebarOpen(false);
+                          setIsMobileChaptersOpen(false);
+                        }}
+                        className="hidden lg:inline-flex p-1 reader-control-btn cursor-pointer"
+                        title="Collapse Chapter Sidebar"
                       >
-                        <Sparkles className="w-4 h-4" />
-                        <span>
-                          {isAiRewriting
-                            ? 'Summarizing...'
-                            : currentChapter.summaryStatus === 'failed'
-                            ? `Retry AI Summary (Ch.${currentChapter.number})`
-                            : `AI Summarize Chapter ${currentChapter.number}`}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onSelectMode('original')}
-                        className="px-4 py-2.5 bg-[#111] hover:bg-[#222] text-[#F6C90E] font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm cursor-pointer"
-                      >
-                        Read Original Chapter Text
+                        <PanelLeftClose className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
-                ) : (
-                  <div className="space-y-4 font-editorial text-base leading-relaxed text-[#111]">
-                    {displayedCompactParagraphs.map((para, idx) => (
-                      <div
-                        key={idx}
-                        className="p-4 bg-white border-2 border-[#111]"
-                      >
-                        <p>{para}</p>
-                      </div>
-                    ))}
+
+                  <div className="space-y-1.5 max-h-[360px] lg:max-h-[560px] overflow-y-auto pr-1">
+                    {book.chapters.map((ch, idx) => {
+                      const isSelected = idx === selectedChapterIdx;
+                      const chCompressed = isChapterCompressed(ch);
+                      const chFailed = ch.summaryStatus === 'failed';
+                      return (
+                        <button
+                          key={ch.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedChapterIdx(idx);
+                            setIsMobileChaptersOpen(false);
+                          }}
+                          className={`w-full text-left p-2.5 transition-colors cursor-pointer flex items-center justify-between gap-2 ${
+                            isSelected
+                              ? 'reader-control-btn-active'
+                              : 'reader-control-btn'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 font-mono-tech text-[10px] uppercase opacity-80">
+                              <span>
+                                {book.chapterStructure === 'editorial_sections'
+                                  ? `Section ${ch.number}`
+                                  : `Chapter ${ch.number}`}
+                              </span>
+                              {ch.pageStart && ch.pageEnd && (
+                                <span>
+                                  (pp. {ch.pageStart}–{ch.pageEnd})
+                                </span>
+                              )}
+                              {chCompressed && (
+                                <CheckCircle2 className="w-3 h-3 inline shrink-0" />
+                              )}
+                              {chFailed && (
+                                <AlertTriangle className="w-3 h-3 text-[#E50914] inline shrink-0" />
+                              )}
+                            </div>
+                            <div className="font-bold text-xs leading-snug line-clamp-1 mt-0.5">
+                              {ch.title.replace(/^Chapter\s+\d+[:.-]?\s*/i, '')}
+                            </div>
+                          </div>
+                          <span className="font-mono-tech text-[10px] font-bold px-1.5 py-0.5 border reader-divider shrink-0 opacity-90">
+                            {activeMode === 'original'
+                              ? `${ch.originalPages}p`
+                              : `${ch.compactPages}p`}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </aside>
+            )}
+
+            {/* Right / Main Reading Canvas */}
+            <div
+              className={`${
+                focusMode
+                  ? 'flex-1 w-full px-4 sm:px-8 md:px-14 py-8 sm:py-12'
+                  : isDesktopSidebarOpen
+                  ? 'lg:col-span-8 xl:col-span-9 p-4 sm:p-6 md:p-8'
+                  : 'lg:col-span-12 p-4 sm:p-6 md:p-10'
+              } flex flex-col justify-between`}
+            >
+              <div className="w-full mx-auto" style={{ maxWidth: CONTENT_WIDTH_MAP[contentWidth] }}>
+                {/* Desktop button to reopen collapsed chapter sidebar in normal mode */}
+                {!focusMode && !isDesktopSidebarOpen && (
+                  <div className="hidden lg:flex mb-4">
+                    <button
+                      type="button"
+                      onClick={() => setIsDesktopSidebarOpen(true)}
+                      className="px-2.5 py-1 reader-control-btn font-mono-tech text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <PanelLeftOpen className="w-3.5 h-3.5" />
+                      <span>
+                        Show Chapters ({book.chapters.length})
+                      </span>
+                    </button>
                   </div>
                 )}
-              </div>
-            )}
 
-            {/* MODE 3: BRIEF (2-4 PAGE SUMMARY) */}
-            {activeMode === 'super_short' && (
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
-                  <div>
-                    <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                      Quick Overview
-                    </span>
-                    <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
-                      {book.title} — {book.superShortPages}-Page Summary
-                    </h3>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-[#F6C90E] border-2 border-[#111] shadow-brutal-sm">
-                  <div className="font-mono-tech text-xs font-bold uppercase">
-                    Core Theme
-                  </div>
-                  <p className="font-editorial font-semibold text-base mt-1 text-[#111]">
-                    {book.superShortExecutiveSummary.thesis}
-                  </p>
-                </div>
-
-                <div className="space-y-3">
-                  {book.superShortExecutiveSummary.executivePages.map(
-                    (pageText, idx) => (
-                      <div
-                        key={idx}
-                        className="p-4 bg-white border-2 border-[#111] font-editorial text-sm sm:text-base leading-relaxed"
-                      >
-                        <div className="font-mono-tech text-xs font-bold text-[#E50914] mb-1">
-                          Page {idx + 1} of {book.superShortPages}
+                {/* =========================================================
+                    MODE 1: ORIGINAL MANUSCRIPT
+                   ========================================================= */}
+                {activeMode === 'original' && (
+                  <article className="space-y-6">
+                    <header className="pb-4 border-b reader-divider flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="font-mono-tech text-xs font-bold uppercase reader-accent-text">
+                          {book.chapterStructure === 'editorial_sections'
+                            ? `Editorial Section ${currentChapter.number} of ${book.chapters.length}`
+                            : `Chapter ${currentChapter.number} of ${book.chapters.length}`}
+                          {currentChapter.pageStart && currentChapter.pageEnd
+                            ? ` · Pages ${currentChapter.pageStart}–${currentChapter.pageEnd}`
+                            : ` · ${currentChapter.originalPages} Pages`}
                         </div>
-                        <p>{pageText}</p>
+                        <h3 className="font-editorial font-bold text-xl sm:text-2xl md:text-3xl reader-text-primary leading-tight">
+                          {currentChapter.title}
+                        </h3>
                       </div>
-                    )
-                  )}
-                </div>
-              </div>
-            )}
 
-            {/* MODE 4: HIGHLIGHTS (BULLETS) */}
-            {activeMode === 'bullet' && (
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
-                  <div>
-                    <span className="font-mono-tech text-xs font-bold uppercase text-[#0047FF]">
-                      Key Highlights
-                    </span>
-                    <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
-                      {bulletScope === 'chapter'
-                        ? currentChapter.title
-                        : `${book.title} — All Chapters`}
-                    </h3>
-                  </div>
+                      {/* Contextual Chapter Action in Normal Mode */}
+                      {!focusMode && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectMode('compact');
+                            if (!currentChapterIsCompressed) {
+                              void handleCompressCurrentChapter(false);
+                            }
+                          }}
+                          className="px-3 py-1.5 reader-control-btn font-mono-tech text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 reader-accent-text" />
+                          <span>
+                            {currentChapterIsCompressed
+                              ? `View Ch. ${currentChapter.number} Summary`
+                              : `Summarize Ch. ${currentChapter.number}`}
+                          </span>
+                        </button>
+                      )}
+                    </header>
 
-                  <div className="flex items-center border-2 border-[#111] bg-white">
-                    <button
-                      type="button"
-                      onClick={() => setBulletScope('chapter')}
-                      className={`px-3 py-1 text-xs font-bold cursor-pointer whitespace-nowrap ${
-                        bulletScope === 'chapter'
-                          ? 'bg-[#111] text-[#F6C90E]'
-                          : 'text-[#111] hover:bg-[#EEE]'
-                      }`}
+                    {!focusMode &&
+                      book.availabilityStatus === 'condensed_edition' &&
+                      book.gutenbergId && (
+                        <div className="p-3.5 reader-surface-muted border reader-divider flex flex-wrap items-center justify-between gap-3 text-xs">
+                          <div className="reader-text-secondary">
+                            <strong className="reader-text-primary">
+                              Curated Condensed Edition ({book.chapters.length}{' '}
+                              Editorial Sections):
+                            </strong>{' '}
+                            Full unabridged public-domain chapters are available
+                            from Project Gutenberg (#{book.gutenbergId}).
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void fetchGutenbergManuscript()}
+                            className="px-3 py-1.5 reader-control-btn font-mono-tech font-bold cursor-pointer shrink-0"
+                          >
+                            Load Unabridged Gutenberg Text →
+                          </button>
+                        </div>
+                      )}
+
+                    <div
+                      ref={readingProseRef}
+                      data-testid="reader-prose-content"
+                      style={proseContainerStyle}
+                      className="reader-prose reader-text-primary"
                     >
-                      This Chapter
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setBulletScope('entire_book')}
-                      className={`px-3 py-1 text-xs font-bold border-l-2 border-[#111] cursor-pointer whitespace-nowrap ${
-                        bulletScope === 'entire_book'
-                          ? 'bg-[#111] text-[#F6C90E]'
-                          : 'text-[#111] hover:bg-[#EEE]'
-                      }`}
-                    >
-                      Entire Book
-                    </button>
-                  </div>
-                </div>
+                      {currentChapter.originalText.map((para, i) => (
+                        <p
+                          key={i}
+                          style={paragraphGapStyle}
+                          className={
+                            i === 0
+                              ? 'first-letter:font-bold first-letter:text-2xl first-letter:mr-0.5'
+                              : ''
+                          }
+                        >
+                          {para}
+                        </p>
+                      ))}
+                    </div>
+                  </article>
+                )}
 
-                {bulletScope === 'chapter' && !currentChapterIsCompressed ? (
-                  <div className="p-5 bg-white border-2 border-[#111] shadow-brutal-sm flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="font-display-brutal text-sm uppercase text-[#111]">
-                        Generate Chapter {currentChapter.number} Highlights
+                {/* =========================================================
+                    MODE 2: COMPACT EDITION (CHAPTER SUMMARY)
+                   ========================================================= */}
+                {activeMode === 'compact' && (
+                  <article className="space-y-6">
+                    <header className="pb-4 border-b reader-divider space-y-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2 font-mono-tech text-xs">
+                            <span className="font-bold uppercase reader-accent-text">
+                              Compact Edition · Chapter {currentChapter.number}{' '}
+                              of {book.chapters.length}
+                            </span>
+                            {chapterSummaryBadge && (
+                              <>
+                                <span
+                                  aria-hidden="true"
+                                  className="reader-text-muted"
+                                >
+                                  ·
+                                </span>
+                                <span className="reader-text-muted font-semibold">
+                                  {chapterSummaryBadge.label}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                          <h3 className="font-editorial font-bold text-xl sm:text-2xl md:text-3xl reader-text-primary leading-tight">
+                            {currentChapter.title}
+                          </h3>
+                        </div>
+
+                        <span className="font-mono-tech text-xs font-bold reader-surface-muted px-2.5 py-1 border reader-divider reader-text-secondary shrink-0">
+                          {currentChapter.originalPages}p →{' '}
+                          {currentChapter.compactPages}p
+                        </span>
                       </div>
-                      <p className="text-xs text-[#444] mt-0.5">
-                        Click to generate verified AI bullet takeaways for this chapter.
+
+                      {/* Contextual Chapter Summarization Action Bar (Normal Mode) */}
+                      {!focusMode && (
+                        <div
+                          data-testid="contextual-chapter-action"
+                          className="p-3 reader-surface-muted border reader-divider flex flex-wrap items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-8 h-8 border reader-divider shrink-0 overflow-hidden">
+                              <PersonaPortraitSvg
+                                personaId={settings.authorPersonality}
+                              />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-bold reader-text-primary truncate">
+                                Chapter {currentChapter.number} Adapter:{' '}
+                                {activeAuthorDisplayName} ({detailLevel})
+                              </div>
+                              <div className="reader-text-muted text-[11px] truncate">
+                                {currentChapterIsCompressed
+                                  ? `Verified summary active for "${currentChapter.title}"`
+                                  : `Ready to summarize "${currentChapter.title}"`}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            {confirmOverwriteChapterId === currentChapter.id ? (
+                              <div
+                                data-testid="overwrite-summary-confirmation"
+                                className="flex flex-wrap items-center gap-1.5"
+                              >
+                                <span className="font-mono-tech text-[11px] font-bold reader-accent-text">
+                                  Overwrite Ch. {currentChapter.number} summary?
+                                </span>
+                                <button
+                                  type="button"
+                                  data-testid="confirm-overwrite-summary"
+                                  disabled={isAiRewriting}
+                                  onClick={() =>
+                                    void handleCompressCurrentChapter(true)
+                                  }
+                                  className="px-2.5 py-1 reader-accent-btn font-mono-tech text-[11px] font-bold cursor-pointer"
+                                >
+                                  Confirm
+                                </button>
+                                <button
+                                  type="button"
+                                  data-testid="cancel-overwrite-summary"
+                                  onClick={() =>
+                                    setConfirmOverwriteChapterId(null)
+                                  }
+                                  className="px-2 py-1 reader-control-btn font-mono-tech text-[11px] cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                data-testid="chapter-summarize-button"
+                                onClick={() =>
+                                  void handleCompressCurrentChapter(false)
+                                }
+                                disabled={isAiRewriting || isBatchCompressing}
+                                className={`px-3 py-1.5 font-mono-tech text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                                  currentChapterIsCompressed
+                                    ? 'reader-control-btn'
+                                    : 'reader-accent-btn'
+                                }`}
+                              >
+                                {isAiRewriting ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                )}
+                                <span>
+                                  {isAiRewriting
+                                    ? `Summarizing Ch. ${currentChapter.number}...`
+                                    : currentChapterIsCompressed
+                                    ? `Regenerate Ch. ${currentChapter.number} (${activeAuthorDisplayName})`
+                                    : `AI Summarize Ch. ${currentChapter.number} (${activeAuthorDisplayName})`}
+                                </span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => onSelectMode('audiobook')}
+                              className="px-2.5 py-1.5 reader-control-btn font-mono-tech text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Headphones className="w-3.5 h-3.5" />
+                              <span>Listen</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </header>
+
+                    {!currentChapterIsCompressed ? (
+                      <div className="p-6 reader-surface border-2 reader-divider text-center space-y-4 my-4">
+                        <h4 className="font-display-brutal text-lg uppercase reader-text-primary">
+                          {currentChapter.summaryStatus === 'failed'
+                            ? `Summarization Failed for ${currentChapter.title}`
+                            : `Summarize Chapter ${currentChapter.number}: ${currentChapter.title}`}
+                        </h4>
+                        <p className="text-sm reader-text-secondary max-w-md mx-auto">
+                          {currentChapter.summaryStatus === 'failed'
+                            ? currentChapter.summaryErrorMessage ||
+                              'The AI summarization request could not be completed. The chapter remains uncompressed so we never show fake AI output.'
+                            : `Condense this ${currentChapter.originalPages}-page chapter into a ${currentChapter.compactPages}-page ${detailLevel} summary in ${activeAuthorDisplayName}’s voice.`}
+                        </p>
+                        <div className="flex flex-wrap items-center justify-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleCompressCurrentChapter(true)
+                            }
+                            disabled={isAiRewriting}
+                            className="px-5 py-2.5 reader-accent-btn font-display-brutal text-xs uppercase flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                          >
+                            {isAiRewriting ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-4 h-4" />
+                            )}
+                            <span>
+                              {isAiRewriting
+                                ? 'Summarizing Chapter...'
+                                : currentChapter.summaryStatus === 'failed'
+                                ? `Retry AI Summary (Ch. ${currentChapter.number})`
+                                : `AI Summarize Chapter ${currentChapter.number}`}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onSelectMode('original')}
+                            className="px-4 py-2.5 reader-control-btn font-display-brutal text-xs uppercase cursor-pointer"
+                          >
+                            Read Original Chapter Text
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        ref={readingProseRef}
+                        data-testid="reader-prose-content"
+                        style={proseContainerStyle}
+                        className="reader-prose reader-text-primary"
+                      >
+                        {displayedCompactParagraphs.map((para, idx) => (
+                          <p
+                            key={idx}
+                            style={paragraphGapStyle}
+                            className={
+                              idx === 0
+                                ? 'first-letter:font-bold first-letter:text-2xl first-letter:mr-0.5'
+                                : ''
+                            }
+                          >
+                            {para}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+                )}
+
+                {/* =========================================================
+                    MODE 3: BRIEF (2-4 PAGE EXECUTIVE OVERVIEW)
+                   ========================================================= */}
+                {activeMode === 'super_short' && (
+                  <article className="space-y-6">
+                    <header className="pb-4 border-b reader-divider">
+                      <span className="font-mono-tech text-xs font-bold uppercase reader-accent-text">
+                        Executive Brief · {book.superShortPages}-Page Synthesis
+                      </span>
+                      <h3 className="font-editorial font-bold text-xl sm:text-2xl md:text-3xl reader-text-primary mt-1">
+                        {book.title}
+                      </h3>
+                    </header>
+
+                    <div className="p-4 reader-surface-muted border reader-divider">
+                      <div className="font-mono-tech text-xs font-bold uppercase reader-accent-text">
+                        Central Thesis
+                      </div>
+                      <p className="font-editorial font-semibold text-base mt-1 reader-text-primary reader-prose">
+                        {book.superShortExecutiveSummary.thesis}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleCompressCurrentChapter}
-                      className="px-4 py-2 bg-[#E50914] text-white font-display-brutal text-xs uppercase border-2 border-[#111] shadow-brutal-sm cursor-pointer"
+
+                    <div
+                      ref={readingProseRef}
+                      style={proseContainerStyle}
+                      className="reader-prose reader-text-primary"
                     >
-                      Generate Highlights
-                    </button>
-                  </div>
-                ) : (
-                  <ul className="space-y-2.5 max-h-[420px] overflow-y-auto pr-1">
-                    {(bulletScope === 'chapter'
-                      ? displayedChapterBullets
-                      : book.masterBookBullets
-                    ).map((item, idx) => (
-                      <li
-                        key={idx}
-                        className="p-3.5 bg-white border-2 border-[#111] shadow-brutal-sm flex items-start gap-3"
-                      >
-                        <span className="w-6 h-6 bg-[#E50914] text-white font-mono-tech text-xs font-bold flex items-center justify-center border border-[#111] shrink-0 mt-0.5">
-                          {idx + 1}
-                        </span>
-                        <span className="text-sm sm:text-base font-medium text-[#111] leading-relaxed">
-                          {item}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            {/* MODE 5: LONG-FORM CHUNKED AUDIOBOOK */}
-            {activeMode === 'audiobook' && (
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#111]">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono-tech text-xs font-bold uppercase text-[#E50914]">
-                        Long-Form Audiobook · Chapter {currentChapter.number}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 font-mono-tech text-[10px] font-bold uppercase border border-[#111] ${
-                          audioEngineStatus === 'ready' ||
-                          audioEngineStatus === 'playing'
-                            ? 'bg-[#10B981] text-[#111]'
-                            : audioEngineStatus === 'failed'
-                            ? 'bg-[#E50914] text-white'
-                            : audioEngineStatus === 'generating'
-                            ? 'bg-[#F6C90E] text-[#111]'
-                            : 'bg-neutral-200 text-[#111]'
-                        }`}
-                      >
-                        STATUS: {audioEngineStatus.toUpperCase()}
-                      </span>
-                    </div>
-                    <h3 className="font-display-brutal text-lg sm:text-xl text-[#111] mt-0.5">
-                      {currentChapter.title}
-                    </h3>
-                  </div>
-                  <span className="font-mono-tech text-xs font-bold bg-[#111] text-[#F6C90E] px-2.5 py-1">
-                    Narrator: {activeNarratorDisplayName}
-                  </span>
-                </div>
-
-                <div className="p-4 bg-[#111] text-white border-[3px] border-[#111] shadow-brutal">
-                  <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-16 h-16 border-2 border-[#F6C90E] overflow-hidden shrink-0">
-                        <PersonaPortraitSvg
-                          personaId={settings.narratorPersonality}
-                        />
-                      </div>
-                      <div>
-                        <div className="text-xs font-mono-tech text-[#F6C90E] uppercase">
-                          {usingBrowserSpeechFallback
-                            ? 'Browser Speech Synthesis'
-                            : `Cloud Neural TTS (${narratorProfile.ttsVoiceName})`}
-                        </div>
-                        <div className="font-display-brutal text-lg">
-                          {activeNarratorDisplayName}
-                        </div>
-                        <div className="text-xs text-neutral-300 font-mono-tech">
-                          {ttsChunks.length > 0
-                            ? `Chunk ${activeChunkIdx + 1} of ${ttsChunks.length} · ${
-                                ttsChunks.filter((c) => c.status === 'ready')
-                                  .length
-                              }/${ttsChunks.length} Ready · ${audioPlaybackSeconds}s`
-                            : 'Sentence/paragraph boundary chunking ready'}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Narrator Quick Switcher */}
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {(
-                        [
-                          'homelander',
-                          'taylor_swift',
-                          'deadpool',
-                          'gandalf',
-                        ] as PresetPersonalityId[]
-                      ).map((pid) => {
-                        const p = PERSONALITY_PROFILES[pid];
-                        const active =
-                          !settings.useCustomNarrator &&
-                          settings.narratorPersonality === pid;
-                        return (
-                          <button
-                            key={pid}
-                            type="button"
-                            onClick={() => {
-                              stopAndCleanupAudio(true);
-                              onUpdateSettings({
-                                narratorPersonality: pid,
-                                useCustomNarrator: false,
-                              });
-                            }}
-                            className={`px-2.5 py-1 text-xs font-bold border cursor-pointer whitespace-nowrap ${
-                              active
-                                ? 'bg-[#F6C90E] text-[#111] border-[#F6C90E]'
-                                : 'bg-neutral-800 text-white border-neutral-600 hover:bg-neutral-700'
-                            }`}
+                      {book.superShortExecutiveSummary.executivePages.map(
+                        (pageText, idx) => (
+                          <div
+                            key={idx}
+                            style={paragraphGapStyle}
+                            className="p-4 reader-surface border reader-divider"
                           >
-                            {p.name}
+                            <div className="font-mono-tech text-xs font-bold reader-accent-text mb-1.5 select-none">
+                              Synthesis Movement {idx + 1} of{' '}
+                              {book.superShortPages}
+                            </div>
+                            <p>{pageText}</p>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </article>
+                )}
+
+                {/* =========================================================
+                    MODE 4: HIGHLIGHTS (BULLETS)
+                   ========================================================= */}
+                {activeMode === 'bullet' && (
+                  <article className="space-y-6">
+                    <header className="pb-4 border-b reader-divider flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <span className="font-mono-tech text-xs font-bold uppercase reader-accent-text">
+                          Key Highlights & Takeaways
+                        </span>
+                        <h3 className="font-editorial font-bold text-xl sm:text-2xl reader-text-primary mt-0.5">
+                          {bulletScope === 'chapter'
+                            ? `Chapter ${currentChapter.number}: ${currentChapter.title}`
+                            : `${book.title} — Complete Book`}
+                        </h3>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          aria-pressed={bulletScope === 'chapter'}
+                          onClick={() => setBulletScope('chapter')}
+                          className={`px-3 py-1 text-xs font-bold cursor-pointer whitespace-nowrap ${
+                            bulletScope === 'chapter'
+                              ? 'reader-control-btn-active'
+                              : 'reader-control-btn'
+                          }`}
+                        >
+                          This Chapter
+                        </button>
+                        <button
+                          type="button"
+                          aria-pressed={bulletScope === 'entire_book'}
+                          onClick={() => setBulletScope('entire_book')}
+                          className={`px-3 py-1 text-xs font-bold cursor-pointer whitespace-nowrap ${
+                            bulletScope === 'entire_book'
+                              ? 'reader-control-btn-active'
+                              : 'reader-control-btn'
+                          }`}
+                        >
+                          Entire Book
+                        </button>
+                      </div>
+                    </header>
+
+                    {bulletScope === 'chapter' && !currentChapterIsCompressed ? (
+                      <div className="p-5 reader-surface border reader-divider flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="font-display-brutal text-sm uppercase reader-text-primary">
+                            Generate Chapter {currentChapter.number} Highlights
+                          </div>
+                          <p className="text-xs reader-text-secondary mt-0.5">
+                            Generate verified AI bullet takeaways for "
+                            {currentChapter.title}".
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isAiRewriting}
+                          onClick={() => void handleCompressCurrentChapter(true)}
+                          className="px-4 py-2 reader-accent-btn font-display-brutal text-xs uppercase cursor-pointer disabled:opacity-50"
+                        >
+                          {isAiRewriting
+                            ? 'Generating...'
+                            : `Summarize Ch. ${currentChapter.number} Highlights`}
+                        </button>
+                      </div>
+                    ) : (
+                      <div ref={readingProseRef} style={proseContainerStyle}>
+                        <ul className="space-y-3 reader-prose">
+                          {(bulletScope === 'chapter'
+                            ? displayedChapterBullets
+                            : book.masterBookBullets
+                          ).map((item, idx) => (
+                            <li
+                              key={idx}
+                              className="p-3.5 reader-surface border reader-divider flex items-start gap-3"
+                            >
+                              <span className="w-6 h-6 reader-control-btn-active font-mono-tech text-xs font-bold flex items-center justify-center shrink-0 mt-0.5 select-none">
+                                {idx + 1}
+                              </span>
+                              <span className="reader-text-primary leading-relaxed">
+                                {item}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </article>
+                )}
+
+                {/* =========================================================
+                    MODE 5: LONG-FORM CHUNKED AUDIOBOOK
+                   ========================================================= */}
+                {activeMode === 'audiobook' && (
+                  <article className="space-y-6">
+                    <header className="pb-4 border-b reader-divider flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2 font-mono-tech text-xs">
+                          <span className="font-bold uppercase reader-accent-text">
+                            Long-Form Audiobook · Chapter{' '}
+                            {currentChapter.number}
+                          </span>
+                          <span aria-hidden="true" className="reader-text-muted">
+                            ·
+                          </span>
+                          <span className="font-bold uppercase reader-text-secondary">
+                            STATUS: {audioEngineStatus.toUpperCase()}
+                          </span>
+                        </div>
+                        <h3 className="font-editorial font-bold text-xl sm:text-2xl reader-text-primary mt-0.5">
+                          {currentChapter.title}
+                        </h3>
+                      </div>
+                      <span className="font-mono-tech text-xs font-bold reader-surface-muted border reader-divider px-2.5 py-1 reader-text-primary">
+                        Narrator: {activeNarratorDisplayName}
+                      </span>
+                    </header>
+
+                    <div className="p-4 reader-surface-muted border-2 reader-divider space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-14 h-14 border-2 reader-divider overflow-hidden shrink-0">
+                            <PersonaPortraitSvg
+                              personaId={settings.narratorPersonality}
+                            />
+                          </div>
+                          <div>
+                            <div className="text-xs font-mono-tech reader-accent-text uppercase font-bold">
+                              {usingBrowserSpeechFallback
+                                ? 'Browser Speech Synthesis'
+                                : `Cloud Neural TTS (${narratorProfile.ttsVoiceName})`}
+                            </div>
+                            <div className="font-display-brutal text-base sm:text-lg reader-text-primary">
+                              {activeNarratorDisplayName}
+                            </div>
+                            <div className="text-xs reader-text-muted font-mono-tech">
+                              {ttsChunks.length > 0
+                                ? `Chunk ${activeChunkIdx + 1} of ${
+                                    ttsChunks.length
+                                  } · ${
+                                    ttsChunks.filter(
+                                      (c) => c.status === 'ready'
+                                    ).length
+                                  }/${
+                                    ttsChunks.length
+                                  } Ready · ${audioPlaybackSeconds}s`
+                                : 'Sentence/paragraph boundary chunking ready'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Narrator Quick Switcher */}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {(
+                            [
+                              'homelander',
+                              'taylor_swift',
+                              'deadpool',
+                              'gandalf',
+                            ] as PresetPersonalityId[]
+                          ).map((pid) => {
+                            const p = PERSONALITY_PROFILES[pid];
+                            const active =
+                              !settings.useCustomNarrator &&
+                              settings.narratorPersonality === pid;
+                            return (
+                              <button
+                                key={pid}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => {
+                                  stopAndCleanupAudio(true);
+                                  onUpdateSettings({
+                                    narratorPersonality: pid,
+                                    useCustomNarrator: false,
+                                  });
+                                }}
+                                className={`px-2.5 py-1 text-xs font-bold cursor-pointer whitespace-nowrap ${
+                                  active
+                                    ? 'reader-control-btn-active'
+                                    : 'reader-control-btn'
+                                }`}
+                              >
+                                {p.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Audio Controls Bar */}
+                      <div className="pt-3 border-t reader-divider flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            aria-label="Previous audio chunk"
+                            onClick={() => {
+                              const prev = Math.max(0, activeChunkIdx - 1);
+                              if (usingBrowserSpeechFallback) {
+                                handlePlayBrowserSpeechSynthesis(prev);
+                              } else if (isAudiobookReady(ttsChunks)) {
+                                playReadyChunkAtIndex(ttsChunks, prev);
+                              } else {
+                                setActiveChunkIdx(prev);
+                              }
+                            }}
+                            className="p-2 reader-control-btn cursor-pointer"
+                          >
+                            <SkipBack className="w-4 h-4" />
                           </button>
+
+                          <button
+                            type="button"
+                            onClick={handlePauseResumeAudio}
+                            disabled={audioEngineStatus === 'generating'}
+                            className="px-4 py-2 reader-accent-btn font-display-brutal text-xs uppercase flex items-center gap-2 cursor-pointer disabled:opacity-60"
+                          >
+                            {isPlayingAudio ? (
+                              <>
+                                <Pause className="w-4 h-4 fill-current" />
+                                <span>Pause</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-4 h-4 fill-current" />
+                                <span>
+                                  {audioEngineStatus === 'generating'
+                                    ? 'Generating Audio Chunks...'
+                                    : isPausedAudio
+                                    ? 'Resume Chapter'
+                                    : 'Generate & Play Chapter'}
+                                </span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            aria-label="Next audio chunk"
+                            onClick={() => {
+                              const next = Math.min(
+                                Math.max(0, ttsChunks.length - 1),
+                                activeChunkIdx + 1
+                              );
+                              if (usingBrowserSpeechFallback) {
+                                handlePlayBrowserSpeechSynthesis(next);
+                              } else if (isAudiobookReady(ttsChunks)) {
+                                playReadyChunkAtIndex(ttsChunks, next);
+                              } else {
+                                setActiveChunkIdx(next);
+                              }
+                            }}
+                            className="p-2 reader-control-btn cursor-pointer"
+                          >
+                            <SkipForward className="w-4 h-4" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handlePlayBrowserSpeechSynthesis(0)}
+                            className="px-3 py-2 reader-control-btn text-xs font-mono-tech font-bold cursor-pointer"
+                          >
+                            Use Browser Speech
+                          </button>
+                        </div>
+
+                        {/* Speed Selector */}
+                        <div className="flex items-center gap-1.5 font-mono-tech text-xs">
+                          <Volume2 className="w-4 h-4 reader-accent-text" />
+                          <span className="reader-text-muted">SPEED:</span>
+                          {[1.0, 1.25, 1.5].map((spd) => (
+                            <button
+                              key={spd}
+                              type="button"
+                              aria-pressed={playbackSpeed === spd}
+                              onClick={() => {
+                                setPlaybackSpeed(spd);
+                                if (audioElementRef.current) {
+                                  audioElementRef.current.playbackRate = spd;
+                                }
+                              }}
+                              className={`px-2 py-0.5 cursor-pointer font-bold ${
+                                playbackSpeed === spd
+                                  ? 'reader-control-btn-active'
+                                  : 'reader-control-btn'
+                              }`}
+                            >
+                              {spd}x
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Chunk Queue Status & Per-Chunk Retry List */}
+                    <div
+                      ref={readingProseRef}
+                      style={proseContainerStyle}
+                      className="space-y-3 reader-prose"
+                    >
+                      {(ttsChunks.length > 0
+                        ? ttsChunks
+                        : chunkTextForTts(getAudioSourceParagraphs(), 720)
+                      ).map((chunk, idx) => {
+                        const isCurrent = idx === activeChunkIdx;
+                        const actualChunk = ttsChunks[idx] || chunk;
+                        return (
+                          <div
+                            key={idx}
+                            className={`p-3.5 border transition-colors ${
+                              isCurrent
+                                ? 'reader-surface-muted border-2'
+                                : 'reader-surface reader-divider'
+                            }`}
+                            style={
+                              isCurrent
+                                ? { borderColor: 'var(--reader-accent)' }
+                                : undefined
+                            }
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono-tech font-bold mb-1.5 select-none">
+                              <span className="reader-accent-text">
+                                Audio Segment {idx + 1} (
+                                {actualChunk.text.length} chars)
+                              </span>
+
+                              <div className="flex items-center gap-2">
+                                <span className="px-2 py-0.5 reader-surface-muted border reader-divider uppercase reader-text-secondary">
+                                  {actualChunk.status}
+                                </span>
+
+                                {actualChunk.status === 'failed' && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleRetrySingleFailedChunk(idx)
+                                    }
+                                    className="px-2.5 py-0.5 reader-accent-btn cursor-pointer flex items-center gap-1"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Retry Segment {idx + 1}</span>
+                                  </button>
+                                )}
+
+                                {actualChunk.status === 'ready' && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      playReadyChunkAtIndex(ttsChunks, idx)
+                                    }
+                                    className="px-2.5 py-0.5 reader-control-btn-active cursor-pointer"
+                                  >
+                                    {isCurrent && isPlayingAudio
+                                      ? '▶ Playing'
+                                      : 'Play Segment'}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {actualChunk.errorMessage && (
+                              <div className="text-xs font-mono-tech text-[#E50914] mb-1 select-none">
+                                Chunk Error: {actualChunk.errorMessage}
+                              </div>
+                            )}
+
+                            <p className="reader-text-primary leading-relaxed">
+                              {actualChunk.text}
+                            </p>
+                          </div>
                         );
                       })}
                     </div>
-                  </div>
-
-                  {/* Audio Controls Bar */}
-                  <div className="mt-4 pt-3 border-t border-neutral-700 flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        aria-label="Previous audio chunk"
-                        onClick={() => {
-                          const prev = Math.max(0, activeChunkIdx - 1);
-                          if (usingBrowserSpeechFallback) {
-                            handlePlayBrowserSpeechSynthesis(prev);
-                          } else if (isAudiobookReady(ttsChunks)) {
-                            playReadyChunkAtIndex(ttsChunks, prev);
-                          } else {
-                            setActiveChunkIdx(prev);
-                          }
-                        }}
-                        className="p-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 cursor-pointer"
-                      >
-                        <SkipBack className="w-4 h-4" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handlePauseResumeAudio}
-                        disabled={audioEngineStatus === 'generating'}
-                        className="px-4 py-2 bg-[#F6C90E] hover:bg-[#DDA900] text-[#111] font-display-brutal text-xs uppercase flex items-center gap-2 cursor-pointer disabled:opacity-60"
-                      >
-                        {isPlayingAudio ? (
-                          <>
-                            <Pause className="w-4 h-4 fill-current" />
-                            <span>Pause</span>
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-4 h-4 fill-current" />
-                            <span>
-                              {audioEngineStatus === 'generating'
-                                ? 'Generating Audio Chunks...'
-                                : isPausedAudio
-                                ? 'Resume Chapter'
-                                : 'Generate & Play Chapter'}
-                            </span>
-                          </>
-                        )}
-                      </button>
-
-                      <button
-                        type="button"
-                        aria-label="Next audio chunk"
-                        onClick={() => {
-                          const next = Math.min(
-                            Math.max(0, ttsChunks.length - 1),
-                            activeChunkIdx + 1
-                          );
-                          if (usingBrowserSpeechFallback) {
-                            handlePlayBrowserSpeechSynthesis(next);
-                          } else if (isAudiobookReady(ttsChunks)) {
-                            playReadyChunkAtIndex(ttsChunks, next);
-                          } else {
-                            setActiveChunkIdx(next);
-                          }
-                        }}
-                        className="p-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 cursor-pointer"
-                      >
-                        <SkipForward className="w-4 h-4" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handlePlayBrowserSpeechSynthesis(0)}
-                        className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-xs font-mono-tech border border-neutral-600 cursor-pointer"
-                      >
-                        Use Browser Speech
-                      </button>
-                    </div>
-
-                    {/* Speed Selector */}
-                    <div className="flex items-center gap-1.5 font-mono-tech text-xs">
-                      <Volume2 className="w-4 h-4 text-[#F6C90E]" />
-                      <span>SPEED:</span>
-                      {[1.0, 1.25, 1.5].map((spd) => (
-                        <button
-                          key={spd}
-                          type="button"
-                          onClick={() => {
-                            setPlaybackSpeed(spd);
-                            if (audioElementRef.current) {
-                              audioElementRef.current.playbackRate = spd;
-                            }
-                          }}
-                          className={`px-2 py-0.5 border cursor-pointer ${
-                            playbackSpeed === spd
-                              ? 'bg-[#E50914] text-white border-white font-bold'
-                              : 'bg-neutral-800 text-neutral-300 border-neutral-700'
-                          }`}
-                        >
-                          {spd}x
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Chunk Queue Status & Per-Chunk Retry List */}
-                <div className="space-y-2.5">
-                  {(ttsChunks.length > 0
-                    ? ttsChunks
-                    : chunkTextForTts(getAudioSourceParagraphs(), 720)
-                  ).map((chunk, idx) => {
-                    const isCurrent = idx === activeChunkIdx;
-                    const actualChunk = ttsChunks[idx] || chunk;
-                    return (
-                      <div
-                        key={idx}
-                        className={`p-3.5 border-2 border-[#111] transition-colors ${
-                          isCurrent
-                            ? 'bg-[#F6C90E]/35 shadow-brutal-sm'
-                            : 'bg-white'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono-tech font-bold mb-1.5">
-                          <span className="text-[#E50914]">
-                            Audio Segment {idx + 1} ({actualChunk.text.length} chars)
-                          </span>
-
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`px-2 py-0.5 border border-[#111] uppercase ${
-                                actualChunk.status === 'ready'
-                                  ? 'bg-[#10B981] text-[#111]'
-                                  : actualChunk.status === 'failed'
-                                  ? 'bg-[#E50914] text-white'
-                                  : actualChunk.status === 'generating'
-                                  ? 'bg-[#F6C90E] text-[#111]'
-                                  : 'bg-neutral-100 text-[#444]'
-                              }`}
-                            >
-                              {actualChunk.status}
-                            </span>
-
-                            {actualChunk.status === 'failed' && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void handleRetrySingleFailedChunk(idx)
-                                }
-                                className="px-2.5 py-0.5 bg-[#111] text-[#F6C90E] border border-[#111] cursor-pointer flex items-center gap-1"
-                              >
-                                <RotateCcw className="w-3 h-3" />
-                                <span>Retry Segment {idx + 1}</span>
-                              </button>
-                            )}
-
-                            {actualChunk.status === 'ready' && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  playReadyChunkAtIndex(ttsChunks, idx)
-                                }
-                                className="px-2.5 py-0.5 bg-[#111] text-white cursor-pointer"
-                              >
-                                {isCurrent && isPlayingAudio
-                                  ? '▶ Playing'
-                                  : 'Play Segment'}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        {actualChunk.errorMessage && (
-                          <div className="text-xs font-mono-tech text-[#E50914] mb-1">
-                            Chunk Error: {actualChunk.errorMessage}
-                          </div>
-                        )}
-
-                        <p className="font-editorial text-sm sm:text-base text-[#111] leading-relaxed">
-                          {actualChunk.text}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
+                  </article>
+                )}
               </div>
-            )}
 
-            {/* Bottom Chapter Prev/Next Bar */}
-            <div className="mt-6 pt-4 border-t-2 border-[#111] flex items-center justify-between gap-2">
-              <button
-                type="button"
-                disabled={selectedChapterIdx === 0}
-                onClick={() => {
-                  setSelectedChapterIdx((i) => Math.max(0, i - 1));
-                }}
-                className="px-3 py-1.5 bg-white border-2 border-[#111] shadow-brutal-sm font-bold text-xs flex items-center gap-1 cursor-pointer disabled:opacity-40"
+              {/* Bottom Chapter Prev/Next & Reading Progress Footer */}
+              <div
+                className="w-full mx-auto mt-10 pt-5 border-t reader-divider flex flex-wrap items-center justify-between gap-3"
+                style={{ maxWidth: CONTENT_WIDTH_MAP[contentWidth] }}
               >
-                <ChevronLeft className="w-4 h-4" />
-                <span>Previous Chapter</span>
-              </button>
+                <button
+                  type="button"
+                  disabled={selectedChapterIdx === 0}
+                  onClick={() => {
+                    setSelectedChapterIdx((i) => Math.max(0, i - 1));
+                    if (focusMode && readerSectionRef.current) {
+                      readerSectionRef.current.scrollTo({
+                        top: 0,
+                        behavior: 'smooth',
+                      });
+                    }
+                  }}
+                  className="px-3.5 py-2 reader-control-btn font-bold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Previous Chapter</span>
+                </button>
 
-              <span className="font-mono-tech text-xs font-bold flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-[#059669]" />
-                <span>
-                  Chapter {currentChapter.number} of {book.chapters.length}
+                <span className="font-mono-tech text-xs font-semibold reader-text-muted flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 reader-accent-text shrink-0" />
+                  <span>
+                    Chapter {currentChapter.number} of {book.chapters.length} ·{' '}
+                    {overallBookProgressPercent}%
+                  </span>
                 </span>
-              </span>
 
-              <button
-                type="button"
-                disabled={selectedChapterIdx >= book.chapters.length - 1}
-                onClick={() => {
-                  setSelectedChapterIdx((i) =>
-                    Math.min(book.chapters.length - 1, i + 1)
-                  );
-                }}
-                className="px-3 py-1.5 bg-[#F6C90E] border-2 border-[#111] shadow-brutal-sm font-bold text-xs flex items-center gap-1 cursor-pointer disabled:opacity-40"
-              >
-                <span>Next Chapter</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
+                <button
+                  type="button"
+                  disabled={selectedChapterIdx >= book.chapters.length - 1}
+                  onClick={() => {
+                    setSelectedChapterIdx((i) =>
+                      Math.min(book.chapters.length - 1, i + 1)
+                    );
+                    if (focusMode && readerSectionRef.current) {
+                      readerSectionRef.current.scrollTo({
+                        top: 0,
+                        behavior: 'smooth',
+                      });
+                    }
+                  }}
+                  className="px-3.5 py-2 reader-control-btn-active font-bold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
+                >
+                  <span>Next Chapter</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
     </section>
   );
 };

@@ -39,6 +39,7 @@ import {
   savePersistedAppState,
 } from './storage';
 import {
+  getMascotModelName,
   parseGutenbergPlainTextChapters,
   resolveMascotModelTier,
   validateMascotChatRequest,
@@ -676,31 +677,81 @@ test('calculateCompactPageAllocation preserves exact 1-to-1 chapter count', () =
   assert.ok(res.totalCompact >= 30 && res.totalCompact <= 40);
 });
 
-test('validateMascotChatRequest validates multi-turn history and routes task tiers to gemini-4-argon, gemini-3.8-flash, and gemini-3.1-flash-lite', () => {
-  assert.equal(resolveMascotModelTier('complex'), 'gemini-4-argon');
-  assert.equal(resolveMascotModelTier('general'), 'gemini-3.8-flash');
-  assert.equal(resolveMascotModelTier('fast'), 'gemini-3.1-flash-lite');
+test('validateMascotChatRequest enforces fixed server-side mascot model and ignores client tier escalation', () => {
+  const prevEnv = process.env.GEMINI_MASCOT_MODEL;
+  delete process.env.GEMINI_MASCOT_MODEL;
+  try {
+    assert.equal(getMascotModelName(), 'gemini-3.1-flash-lite');
+    assert.equal(resolveMascotModelTier('complex'), 'gemini-3.1-flash-lite');
+    assert.equal(resolveMascotModelTier('general'), 'gemini-3.1-flash-lite');
+    assert.equal(resolveMascotModelTier('fast'), 'gemini-3.1-flash-lite');
 
-  const emptyCheck = validateMascotChatRequest({ message: '   ' });
-  assert.equal(emptyCheck.valid, false);
+    const emptyCheck = validateMascotChatRequest({ message: '   ' });
+    assert.equal(emptyCheck.valid, false);
 
-  const validChat = validateMascotChatRequest({
-    message: 'What is the central strategic lesson of Chapter 1?',
-    taskTier: 'complex',
-    personaName: 'Gandalf',
-    bookTitle: 'The Art of War',
-    bookAuthor: 'Sun Tzu',
-    history: [
-      { role: 'model', text: 'Welcome to The Readers Club! I am Mascot.' },
-      { role: 'user', text: 'Tell me about Sun Tzu.' },
-    ],
-  });
+    const validChat = validateMascotChatRequest({
+      message: 'What is the central strategic lesson of Chapter 1?',
+      taskTier: 'complex',
+      personaName: 'Gandalf',
+      bookTitle: 'The Art of War',
+      bookAuthor: 'Sun Tzu',
+      history: [
+        { role: 'model', text: 'Welcome to The Readers Club! I am Mascot.' },
+        { role: 'user', text: 'Tell me about Sun Tzu.' },
+      ],
+    });
 
-  assert.equal(validChat.valid, true);
-  assert.equal(validChat.sanitized?.modelName, 'gemini-4-argon');
-  assert.equal(validChat.sanitized?.history.length, 2);
-  assert.equal(validChat.sanitized?.history[0].role, 'model');
-  assert.equal(validChat.sanitized?.history[1].role, 'user');
+    assert.equal(validChat.valid, true);
+    assert.equal(validChat.sanitized?.modelName, 'gemini-3.1-flash-lite');
+    assert.equal(validChat.sanitized?.taskTier, 'fast');
+    assert.equal(validChat.sanitized?.history.length, 2);
+    assert.equal(validChat.sanitized?.history[0].role, 'model');
+    assert.equal(validChat.sanitized?.history[1].role, 'user');
+
+    process.env.GEMINI_MASCOT_MODEL = 'gemini-custom-mascot-lite';
+    assert.equal(getMascotModelName(), 'gemini-custom-mascot-lite');
+    assert.equal(resolveMascotModelTier('complex'), 'gemini-custom-mascot-lite');
+  } finally {
+    if (prevEnv === undefined) {
+      delete process.env.GEMINI_MASCOT_MODEL;
+    } else {
+      process.env.GEMINI_MASCOT_MODEL = prevEnv;
+    }
+  }
+});
+
+test('migratePersistedState preserves readingTheme, typography preferences, and reading progress scrollRatio across reloads', () => {
+  for (const theme of ['paper', 'sepia', 'evening'] as const) {
+    const migrated = migratePersistedState({
+      version: 2,
+      settings: {
+        readingTheme: theme,
+        readerFontSize: 'lg',
+        readerLineHeight: 'loose',
+        readerParagraphSpacing: 'roomy',
+        readerContentWidth: 'narrow',
+        readerFontFamily: 'sans',
+      },
+      readingProgressByBookId: {
+        'book-1': {
+          bookId: 'book-1',
+          lastChapterIndex: 2,
+          completedChapterIds: ['ch-1', 'ch-2'],
+          lastReadMode: 'compact',
+          scrollRatio: 0.64,
+          updatedAt: '2026-11-06T00:00:00.000Z',
+        },
+      },
+    });
+
+    assert.equal(migrated.settings.readingTheme, theme);
+    assert.equal(migrated.settings.readerFontSize, 'lg');
+    assert.equal(migrated.settings.readerLineHeight, 'loose');
+    assert.equal(migrated.settings.readerParagraphSpacing, 'roomy');
+    assert.equal(migrated.settings.readerContentWidth, 'narrow');
+    assert.equal(migrated.settings.readerFontFamily, 'sans');
+    assert.equal(migrated.readingProgressByBookId['book-1']?.scrollRatio, 0.64);
+  }
 });
 
 // ============================================================================

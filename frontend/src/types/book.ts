@@ -226,6 +226,7 @@ export interface BookReadingProgress {
   mode?: SummaryMode;
   lastSummaryMode: SummaryMode;
   detailLevel?: SummaryDetailLevel;
+  scrollRatio?: number;
   audioChunkIndex?: number;
   audioPlaybackSeconds?: number;
   completedChapterIds?: string[];
@@ -267,9 +268,19 @@ export interface ScoredBookRecommendation {
 }
 
 export type ReadingTheme = 'paper' | 'sepia' | 'evening';
+export type ReaderFontSize = 'sm' | 'md' | 'lg' | 'xl';
+export type ReaderLineHeight = 'snug' | 'relaxed' | 'loose';
+export type ReaderParagraphSpacing = 'compact' | 'normal' | 'roomy';
+export type ReaderContentWidth = 'narrow' | 'comfortable' | 'wide';
+export type ReaderFontFamily = 'serif' | 'sans';
 
 export interface ClubSettings {
   readingTheme?: ReadingTheme;
+  readerFontSize?: ReaderFontSize;
+  readerLineHeight?: ReaderLineHeight;
+  readerParagraphSpacing?: ReaderParagraphSpacing;
+  readerContentWidth?: ReaderContentWidth;
+  readerFontFamily?: ReaderFontFamily;
   authorPersonality: PresetPersonalityId;
   narratorPersonality: PresetPersonalityId;
   defaultSummaryMode?: SummaryMode;
