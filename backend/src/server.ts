@@ -434,9 +434,9 @@ export function validateMascotChatRequest(body: unknown): {
   }
 
   const taskTier: MascotTaskTier =
-    obj.taskTier === 'fast' || obj.taskTier === 'general'
+    obj.taskTier === 'complex' || obj.taskTier === 'general'
       ? obj.taskTier
-      : 'complex';
+      : 'fast';
 
   return {
     valid: true,
@@ -762,29 +762,69 @@ ${passageText}`;
         return runAiLimited(() =>
           withRetryAndTimeout(
             async () => {
-              const response = await ai.models.generateContent({
-                model: modelName,
-                contents: prompt,
-                config: {
-                  systemInstruction:
-                    'You are a factually rigorous, chapter-by-chapter literary summarizer. Never invent facts outside the provided text. Return valid JSON matching the schema.',
-                  responseMimeType: 'application/json',
-                  responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                      compactText: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
+              let activeModel = modelName;
+              let response;
+              try {
+                response = await ai.models.generateContent({
+                  model: activeModel,
+                  contents: prompt,
+                  config: {
+                    systemInstruction:
+                      'You are a factually rigorous, chapter-by-chapter literary summarizer. Never invent facts outside the provided text. Return valid JSON matching the schema.',
+                    responseMimeType: 'application/json',
+                    responseSchema: {
+                      type: Type.OBJECT,
+                      properties: {
+                        compactText: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                        },
+                        bulletPoints: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                        },
                       },
-                      bulletPoints: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
+                      required: ['compactText', 'bulletPoints'],
+                    },
+                  },
+                });
+              } catch (primaryErr: unknown) {
+                const errStr = String(primaryErr);
+                if (
+                  activeModel !== 'gemini-3.1-flash-lite' &&
+                  (errStr.includes('503') ||
+                    errStr.includes('429') ||
+                    errStr.includes('UNAVAILABLE') ||
+                    errStr.includes('RESOURCE_EXHAUSTED'))
+                ) {
+                  activeModel = 'gemini-3.1-flash-lite';
+                  response = await ai.models.generateContent({
+                    model: activeModel,
+                    contents: prompt,
+                    config: {
+                      systemInstruction:
+                        'You are a factually rigorous, chapter-by-chapter literary summarizer. Never invent facts outside the provided text. Return valid JSON matching the schema.',
+                      responseMimeType: 'application/json',
+                      responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                          compactText: {
+                            type: Type.ARRAY,
+                            items: { type: Type.STRING },
+                          },
+                          bulletPoints: {
+                            type: Type.ARRAY,
+                            items: { type: Type.STRING },
+                          },
+                        },
+                        required: ['compactText', 'bulletPoints'],
                       },
                     },
-                    required: ['compactText', 'bulletPoints'],
-                  },
-                },
-              });
+                  });
+                } else {
+                  throw primaryErr;
+                }
+              }
 
               const parsed = JSON.parse((response.text ?? '{}').trim());
               const validated = validateSummarizeApiResponse(parsed);
@@ -1297,23 +1337,57 @@ Rules:
         },
       ];
 
-      const response = await runAiLimited(() =>
-        withRetryAndTimeout(
-          async () =>
-            ai.models.generateContent({
-              model: modelName,
-              contents,
-              config: {
-                systemInstruction,
-              },
-            }),
-          {
-            maxRetries: 2,
-            baseDelayMs: retryBaseDelayMs,
-            timeoutMs: retryTimeoutMs,
-          }
-        )
-      );
+      let usedModel = modelName;
+      let response;
+      try {
+        response = await runAiLimited(() =>
+          withRetryAndTimeout(
+            async () =>
+              ai.models.generateContent({
+                model: usedModel,
+                contents,
+                config: {
+                  systemInstruction,
+                },
+              }),
+            {
+              maxRetries: 2,
+              baseDelayMs: retryBaseDelayMs,
+              timeoutMs: retryTimeoutMs,
+            }
+          )
+        );
+      } catch (chatErr: unknown) {
+        const errStr = String(chatErr);
+        if (
+          usedModel !== 'gemini-3.1-flash-lite' &&
+          (errStr.includes('429') ||
+            errStr.includes('503') ||
+            errStr.includes('RESOURCE_EXHAUSTED') ||
+            errStr.includes('UNAVAILABLE'))
+        ) {
+          usedModel = 'gemini-3.1-flash-lite';
+          response = await runAiLimited(() =>
+            withRetryAndTimeout(
+              async () =>
+                ai.models.generateContent({
+                  model: usedModel,
+                  contents,
+                  config: {
+                    systemInstruction,
+                  },
+                }),
+              {
+                maxRetries: 1,
+                baseDelayMs: retryBaseDelayMs,
+                timeoutMs: retryTimeoutMs,
+              }
+            )
+          );
+        } else {
+          throw chatErr;
+        }
+      }
 
       const replyText = (response.text ?? '').trim();
       if (!replyText) {
@@ -1325,7 +1399,7 @@ Rules:
 
       return res.json({
         reply: replyText,
-        model: modelName,
+        model: usedModel,
         personaName,
         timestamp: new Date().toISOString(),
       });

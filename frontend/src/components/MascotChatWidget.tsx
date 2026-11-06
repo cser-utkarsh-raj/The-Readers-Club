@@ -215,7 +215,7 @@ export const MascotChatWidget: React.FC<MascotChatWidgetProps> = ({
   ];
 
   return (
-    <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end">
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end mascot-chat-widget">
       {/* EXPANDED MASCOT CHAT DRAWER */}
       {isOpen && (
         <section

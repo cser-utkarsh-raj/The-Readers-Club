@@ -130,3 +130,5 @@
 .reader-focus-mode { position:fixed; inset:0; z-index:100; width:100vw; height:100dvh; max-height:100dvh; overflow-y:auto; border:0 !important; border-radius:0 !important; box-shadow:none !important; padding-bottom:env(safe-area-inset-bottom); }
 .reader-focus-mode > :first-child { position:sticky; top:0; z-index:5; }
 @media (max-width:640px) { .reader-focus-mode { padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); } }
+body:has(.reader-focus-mode) .mascot-chat-widget { display: none !important; }
+
